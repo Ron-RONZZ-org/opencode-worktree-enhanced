@@ -3,6 +3,7 @@
  * Tracks active worktree sessions for the list/delete workflow.
  */
 import * as path from "node:path"
+import { Database } from "bun:sqlite"
 
 /** A worktree session record. */
 export interface Session {
@@ -22,9 +23,9 @@ interface PendingDelete {
  * Initialize the worktree state SQLite database.
  * Creates the file and tables if they don't exist.
  */
-export function initStateDb(root: string): import("bun:sqlite").Database {
+export function initStateDb(root: string): Database {
 	const dbPath = path.join(root, ".opencode", "worktree-state.sqlite")
-	const db = new Bun.sqlite(dbPath)
+	const db = new Database(dbPath)
 	db.run("PRAGMA journal_mode=WAL")
 	db.run(`CREATE TABLE IF NOT EXISTS sessions (
 		id TEXT PRIMARY KEY,
@@ -45,7 +46,7 @@ export function initStateDb(root: string): import("bun:sqlite").Database {
 
 /** Add a session to the database. */
 export function addSession(
-	db: import("bun:sqlite").Database,
+	db: Database,
 	session: Session,
 ): void {
 	db.run(
@@ -56,7 +57,7 @@ export function addSession(
 
 /** Remove a session by branch name. */
 export function removeSession(
-	db: import("bun:sqlite").Database,
+	db: Database,
 	branch: string,
 ): void {
 	db.run("DELETE FROM sessions WHERE branch = ?", [branch])
@@ -64,7 +65,7 @@ export function removeSession(
 
 /** Get a session by its opencode session ID. */
 export function getSession(
-	db: import("bun:sqlite").Database,
+	db: Database,
 	sessionId: string,
 ): Session | null {
 	const row = db.query("SELECT id, branch, path, created_at FROM sessions WHERE id = ?").get(sessionId) as Record<string, unknown> | null
@@ -79,7 +80,7 @@ export function getSession(
 
 /** Get a session by worktree path. */
 export function getSessionByPath(
-	db: import("bun:sqlite").Database,
+	db: Database,
 	worktreePath: string,
 ): Session | null {
 	const row = db.query("SELECT id, branch, path, created_at FROM sessions WHERE path = ?").get(worktreePath) as Record<string, unknown> | null
@@ -94,7 +95,7 @@ export function getSessionByPath(
 
 /** Get all sessions. */
 export function getAllSessions(
-	db: import("bun:sqlite").Database,
+	db: Database,
 ): Session[] {
 	const rows = db.query("SELECT id, branch, path, created_at FROM sessions ORDER BY created_at DESC").all() as Record<string, unknown>[]
 	return rows.map((row) => ({
@@ -111,7 +112,7 @@ export function getAllSessions(
 
 /** Set a pending delete record. */
 export function setPendingDelete(
-	db: import("bun:sqlite").Database,
+	db: Database,
 	pending: PendingDelete,
 ): void {
 	db.run("INSERT OR REPLACE INTO pending_delete (branch, path) VALUES (?, ?)", [
@@ -122,7 +123,7 @@ export function setPendingDelete(
 
 /** Get the current pending delete record, if any. */
 export function getPendingDelete(
-	db: import("bun:sqlite").Database,
+	db: Database,
 ): PendingDelete | null {
 	const row = db.query("SELECT branch, path FROM pending_delete LIMIT 1").get() as Record<string, unknown> | null
 	if (!row) return null
@@ -133,6 +134,6 @@ export function getPendingDelete(
 }
 
 /** Clear all pending delete records. */
-export function clearPendingDelete(db: import("bun:sqlite").Database): void {
+export function clearPendingDelete(db: Database): void {
 	db.run("DELETE FROM pending_delete")
 }
