@@ -373,14 +373,4 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 	}
 }
 
-// Expose internals for testing
-export const testInternals = {
-	git,
-	validateWorktreeClean,
-	validateBranchMerged,
-	removeWorktree,
-	copyFiles,
-	symlinkDirs,
-} as const
-
 export default WorktreeEnhancedPlugin
