@@ -7,7 +7,6 @@
  *   worktreeList   — List plugin-managed sessions and git worktrees
  */
 import { type Plugin, tool } from "@opencode-ai/plugin"
-import type { Event } from "@opencode-ai/sdk"
 
 import { loadWorktreeConfig } from "./config"
 import {
@@ -87,7 +86,7 @@ async function isGitRepo($: { text: (strings: TemplateStringsArray, ...values: u
 	}
 }
 
-const WorktreeEnhancedPlugin: Plugin = async ({ client, directory, $ }) => {
+export const WorktreeEnhancedPlugin: Plugin = async ({ client, directory, $ }) => {
 	const inRepo = await isGitRepo($, directory)
 	const log = makeLogger(client, PLUGIN_MARKER)
 
@@ -352,27 +351,6 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 			}),
 		},
 
-		event: async ({ event }: { event: Event }): Promise<void> => {
-			if (!db || event.type !== "session.idle") return
-
-			// Handle any pending delete records (legacy compatibility)
-			const pending = getPendingDelete(db)
-			if (!pending) return
-
-			const config = await loadWorktreeConfig(directory, log)
-			if (config.hooks.preDelete.length) {
-				await runHooks(pending.path, config.hooks.preDelete, log)
-			}
-
-			const removeResult = await removeWorktree(directory, pending.path)
-			if (!removeResult.ok) {
-				log.warn(`Worktree remove failed: ${removeResult.error}`)
-			}
-
-			clearPendingDelete(db)
-			removeSession(db, pending.branch)
-			log.info(`Cleaned up worktree: ${pending.branch} (${pending.path})`)
-		},
 	}
 }
 
