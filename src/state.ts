@@ -1,9 +1,19 @@
 /**
  * SQLite state database for opencode-worktree-enhanced.
  * Tracks active worktree sessions for the list/delete workflow.
+ *
+ * The database is stored globally at
+ *   ~/.local/share/opencode/plugins/worktree/<project-id>.sqlite
+ * keyed by a stable project ID that is the same from any worktree.
+ * This ensures ALL sessions (parent + worktree children) share state.
+ *
+ * Ported from github.com/stevenke1981/opencode-worktree-tools.
  */
+import { mkdirSync } from "node:fs"
+import * as os from "node:os"
 import * as path from "node:path"
 import { Database } from "bun:sqlite"
+import { getProjectId } from "./project-id"
 
 /** A worktree session record. */
 export interface Session {
@@ -19,12 +29,32 @@ interface PendingDelete {
 	path: string
 }
 
+/** Directory where per-project worktree state databases are stored. */
+function getStateDbDir(): string {
+	return path.join(os.homedir(), ".local", "share", "opencode", "plugins", "worktree")
+}
+
+/**
+ * Resolve the global path for this project's worktree state database.
+ * Uses `getProjectId()` which produces the same ID from any worktree.
+ */
+export async function getStateDbPath(projectRoot: string): Promise<string> {
+	const projectId = await getProjectId(projectRoot)
+	return path.join(getStateDbDir(), `${projectId}.sqlite`)
+}
+
 /**
  * Initialize the worktree state SQLite database.
  * Creates the file and tables if they don't exist.
+ *
+ * The database lives at a GLOBAL location keyed by a stable project ID,
+ * so ALL opencode sessions working on the same repo share one DB.
+ * This is the key design choice that prevents the "empty DB in worktree"
+ * bug — see github.com/stevenke1981/opencode-worktree-tools.
  */
-export function initStateDb(root: string): Database {
-	const dbPath = path.join(root, ".opencode", "worktree-state.sqlite")
+export async function initStateDb(projectRoot: string): Promise<Database> {
+	const dbPath = await getStateDbPath(projectRoot)
+	mkdirSync(path.dirname(dbPath), { recursive: true })
 	const db = new Database(dbPath)
 	db.run("PRAGMA journal_mode=WAL")
 	db.run(`CREATE TABLE IF NOT EXISTS sessions (

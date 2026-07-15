@@ -174,6 +174,35 @@ export async function validateBranchMerged(
 // LIST
 // =============================================================================
 
+/**
+ * Resolve the main repository root directory.
+ *
+ * From a git worktree, returns the main repo's root (the original checkout).
+ * From the main repo itself, returns the repo root.
+ *
+ * Detection: in a worktree, `git rev-parse --git-dir` returns a path containing
+ * `/worktrees/` (e.g. `/path/to/main/.git/worktrees/<name>`).
+ * In the main repo, it returns `.git` or `/path/to/main/.git`.
+ */
+export async function getMainRepoRoot(cwd: string): Promise<string | null> {
+	const gitDirResult = await git(["rev-parse", "--git-dir"], cwd)
+	if (!gitDirResult.ok) return null
+
+	const gitDir = gitDirResult.value
+	// Inside a worktree, git-dir is <main>/.git/worktrees/<name>
+	// The presence of /worktrees/ in the git-dir path indicates a worktree
+	if (gitDir.includes("/worktrees/")) {
+		// git-dir may be relative (e.g. ".git/worktrees/foo")
+		// Resolve it relative to cwd, then walk up from .git/worktrees/<name> → <main>
+		const absGitDir = path.resolve(cwd, gitDir)
+		return path.resolve(absGitDir, "../../..")
+	}
+
+	// In the main repo, show-toplevel gives us the root
+	const topLevel = await git(["rev-parse", "--show-toplevel"], cwd)
+	return topLevel.ok ? topLevel.value : null
+}
+
 /** List all git worktrees. Returns a formatted string. */
 export async function listWorktrees(repoRoot: string): Promise<string> {
 	const result = await git(["worktree", "list"], repoRoot)

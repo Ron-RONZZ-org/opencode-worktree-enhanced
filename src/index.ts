@@ -92,8 +92,13 @@ export const WorktreeEnhancedPlugin: Plugin = async ({ client, directory, $ }) =
 
 	projectRoot = directory
 	if (inRepo) {
-		db = initStateDb(directory)
+		// The state DB is stored globally (~/.local/share/opencode/plugins/worktree/)
+		// keyed by a stable project ID that is the SAME from any worktree.
+		// getProjectId() inside initStateDb handles worktree .git file resolution,
+		// so ALL sessions (parent + children) share one DB automatically.
+		db = await initStateDb(directory)
 		registerCleanupHandlers(db)
+		log.info("State DB initialized (global, keyed by project ID)")
 	}
 
 	await client.app.log({
