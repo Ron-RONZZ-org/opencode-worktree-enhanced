@@ -359,7 +359,7 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 			const pending = getPendingDelete(db)
 			if (!pending) return
 
-			const config = await loadWorktreeConfig(directory, (msg: string) => log.info(msg) as unknown as Logger)
+			const config = await loadWorktreeConfig(directory, log)
 			if (config.hooks.preDelete.length) {
 				await runHooks(pending.path, config.hooks.preDelete, log)
 			}
