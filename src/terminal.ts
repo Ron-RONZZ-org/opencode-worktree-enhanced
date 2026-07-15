@@ -91,7 +91,7 @@ function buildWarpLaunchConfigYaml(
 ): string {
 	const quotedName = JSON.stringify(name)
 	const quotedCwd = JSON.stringify(cwd)
-	const cleanupCommand = `rm -f "${escapeBash(configPath)}"`
+	const cleanupCommand = `rm -f ${escapeBash(configPath)}`
 	const commands = [cleanupCommand]
 	if (command) {
 		commands.push(command)
@@ -185,7 +185,7 @@ export async function openTmuxWindow(options: {
 	argv?: string[]
 }): Promise<TerminalResult> {
 	const { sessionName, windowName, cwd, argv } = options
-	const command = argv?.length ? argv.map((a) => `"${escapeBash(a)}"`).join(" ") : undefined
+	const command = argv?.length ? argv.map((a) => escapeBash(a)).join(" ") : undefined
 
 	return tmuxMutex.runExclusive(async () => {
 		try {
@@ -199,7 +199,7 @@ export async function openTmuxWindow(options: {
 				const scriptPath = path.join(getTempDir(), `worktree-${Bun.randomUUIDv7()}.sh`)
 				const escapedCwd = escapeBash(cwd)
 				const scriptContent = wrapWithSelfCleanup(
-					`cd "${escapedCwd}" || exit 1\n${command}\nexec $SHELL`,
+					`cd ${escapedCwd} || exit 1\n${command}\nexec $SHELL`,
 				)
 				await Bun.write(scriptPath, scriptContent)
 				Bun.spawnSync(["chmod", "+x", scriptPath])
@@ -263,12 +263,12 @@ export async function openMacOSTerminal(cwd: string, argv?: string[]): Promise<T
 
 	const escapedCwd = escapeBash(cwd)
 	const command = argv?.length
-		? argv.map((a) => `"${escapeBash(a)}"`).join(" ")
+		? argv.map((a) => escapeBash(a)).join(" ")
 		: undefined
 	const scriptContent = wrapWithSelfCleanup(
 		command
-			? `cd "${escapedCwd}" && ${command}\nexec bash`
-			: `cd "${escapedCwd}"\nexec bash`,
+			? `cd ${escapedCwd} && ${command}\nexec bash`
+			: `cd ${escapedCwd}\nexec bash`,
 	)
 
 	const terminal = detectCurrentMacTerminal()
@@ -280,7 +280,7 @@ export async function openMacOSTerminal(cwd: string, argv?: string[]): Promise<T
 				try {
 					const proc = Bun.spawn(
 						["open", "-na", "Ghostty.app", "--args", `--working-directory=${cwd}`, "-e", "bash", "-c",
-						 command ? `cd "${escapedCwd}" && ${command}` : `cd "${escapedCwd}"`],
+						 command ? `cd ${escapedCwd} && ${command}` : `cd ${escapedCwd}`],
 						{ detached: true, stdio: ["ignore", "ignore", "ignore"] },
 					)
 					proc.unref()
@@ -419,12 +419,12 @@ export async function openLinuxTerminal(cwd: string, argv?: string[]): Promise<T
 
 	const escapedCwd = escapeBash(cwd)
 	const command = argv?.length
-		? argv.map((a) => `"${escapeBash(a)}"`).join(" ")
+		? argv.map((a) => escapeBash(a)).join(" ")
 		: undefined
 	const scriptContent = wrapWithSelfCleanup(
 		command
-			? `cd "${escapedCwd}" && ${command}\nexec bash`
-			: `cd "${escapedCwd}"\nexec bash`,
+			? `cd ${escapedCwd} && ${command}\nexec bash`
+			: `cd ${escapedCwd}\nexec bash`,
 	)
 
 	let scriptPath: string | null = null
@@ -623,12 +623,12 @@ export async function openWSLTerminal(cwd: string, argv?: string[]): Promise<Ter
 
 	const escapedCwd = escapeBash(cwd)
 	const command = argv?.length
-		? argv.map((a) => `"${escapeBash(a)}"`).join(" ")
+		? argv.map((a) => escapeBash(a)).join(" ")
 		: undefined
 	const scriptContent = wrapWithSelfCleanup(
 		command
-			? `cd "${escapedCwd}" && ${command}\nexec bash`
-			: `cd "${escapedCwd}"\nexec bash`,
+			? `cd ${escapedCwd} && ${command}\nexec bash`
+			: `cd ${escapedCwd}\nexec bash`,
 	)
 	const scriptPath = path.join(getTempDir(), `worktree-${Date.now()}-${Math.random().toString(36).slice(2)}.sh`)
 	await Bun.write(scriptPath, scriptContent)
