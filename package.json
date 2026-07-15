@@ -1,0 +1,25 @@
+{
+  "name": "opencode-worktree-tools",
+  "version": "1.0.0",
+  "description": "Global OpenCode plugin: isolated git worktrees with auto terminal spawn and cleanup",
+  "type": "module",
+  "main": "src/index.ts",
+  "files": [
+    "src",
+    "commands"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "git",
+    "worktree",
+    "git-worktree"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.0.0"
+  },
+  "scripts": {
+    "install:global": "node scripts/install-global.mjs"
+  }
+}
