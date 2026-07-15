@@ -218,13 +218,21 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 
 			worktreeDelete: tool({
 				description:
-					"Validate and delete the current worktree. Refuses if worktree is dirty or branch is not merged into main. Removes local and remote branch on success.",
+					"Validate and delete the current worktree. Refuses if worktree is dirty. Also refuses if branch is not merged into main (unless --force is set). Removes local and remote branch on success.",
 				args: {
 					reason: tool.schema
 						.string()
 						.describe("Brief explanation of why you are calling this tool"),
+					force: tool.schema
+						.boolean()
+						.optional()
+						.default(false)
+						.describe(
+							"Skip the merge-into-main validation and force deletion. Only use if you have " +
+								"confirmed the branch is safe to delete (e.g., squash-merged on GitHub).",
+						),
 				},
-				async execute(_args, toolCtx) {
+				async execute(args, toolCtx) {
 					if (!db || !inRepo) return "Not in a git repository."
 
 					// Find worktree by matching the current session's directory
@@ -254,11 +262,17 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 						return `❌ ${cleanResult.error}`
 					}
 
-					// 2. Branch must be fully merged into main
-					const baseBranch = "main"
-					const mergeResult = await validateBranchMerged(directory, session.branch, baseBranch)
-					if (!mergeResult.ok) {
-						return `❌ ${mergeResult.error}`
+					// 2. Branch must be fully merged into main (unless --force)
+					if (!args.force) {
+						const baseBranch = "main"
+						const mergeResult = await validateBranchMerged(directory, session.branch, baseBranch)
+						if (!mergeResult.ok) {
+							return (
+								`❌ ${mergeResult.error}` +
+								`\n\nIf you have confirmed this branch is safe to delete (e.g., it was ` +
+								`squash-merged on GitHub), re-run with --force to skip this check.`
+							)
+						}
 					}
 
 					// ----- Cleanup phase -----
@@ -358,5 +372,15 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 
 	}
 }
+
+// Expose internals for testing
+export const testInternals = {
+	git,
+	validateWorktreeClean,
+	validateBranchMerged,
+	removeWorktree,
+	copyFiles,
+	symlinkDirs,
+} as const
 
 export default WorktreeEnhancedPlugin

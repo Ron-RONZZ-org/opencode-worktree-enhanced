@@ -149,25 +149,42 @@ export async function validateWorktreeClean(
 
 /**
  * Validate that a branch is fully merged into a base branch.
- * Uses `git merge-base --is-ancestor` which exits 0 if ancestor (merged).
+ *
+ * Uses a two-tier detection:
+ *   1. Commit ancestry (`git merge-base --is-ancestor`) — catches regular merges
+ *   2. Content diff (`git diff --quiet`) — catches squash/rebase merges where
+ *      the branch tip's tree matches the base tip's tree (no divergence, no
+ *      conflict resolution during squash).
+ *
+ * Neither method is 100% reliable for squash merges (conflict resolution or
+ * post-merge divergence can cause the diff check to fail). Callers should
+ * offer a `--force` escape hatch when this check fails.
  */
 export async function validateBranchMerged(
 	repoRoot: string,
 	branch: string,
 	baseBranch: string,
 ): Promise<Result<void>> {
-	const result = await git(["merge-base", "--is-ancestor", branch, baseBranch], repoRoot)
-	if (!result.ok) {
-		return Result.err(
-			`Branch "${branch}" is NOT fully merged into "${baseBranch}".\n\n` +
-				`Run these steps first:\n` +
-				`  1. git checkout ${baseBranch}\n` +
-				`  2. git merge ${branch}\n` +
-				`  3. Resolve any conflicts\n` +
-				`  4. Call \`worktreeDelete\` again`,
-		)
-	}
-	return Result.ok(undefined)
+	// Tier 1: Fast path — commit ancestry (works for regular merges)
+	const ancestorResult = await git(["merge-base", "--is-ancestor", branch, baseBranch], repoRoot)
+	if (ancestorResult.ok) return Result.ok(undefined)
+
+	// Tier 2: Content-based check — catches squash/rebase merges where the
+	// branch tip's tree is identical to the base tip's tree.
+	// `git diff --quiet A..B` exits 0 when the trees at A and B are identical.
+	const diffResult = await git(["diff", "--quiet", `${baseBranch}..${branch}`], repoRoot)
+	if (diffResult.ok) return Result.ok(undefined)
+
+	return Result.err(
+		`Branch "${branch}" is NOT fully merged into "${baseBranch}".\n\n` +
+			`Tips:\n` +
+			`  - If the branch was merged via squash/rebase, pull the latest ${baseBranch}:\n` +
+			`      git checkout ${baseBranch} && git pull\n` +
+			`  - If you are certain the branch is safe to delete, use:\n` +
+			`      worktreeDelete --force\n` +
+			`  - Otherwise, merge the branch first:\n` +
+			`      git checkout ${baseBranch} && git merge ${branch}`,
+	)
 }
 
 // =============================================================================

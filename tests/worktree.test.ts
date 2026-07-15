@@ -50,6 +50,17 @@ function mergeBranch(repoPath: string, target: string, source: string): void {
 	execSync(`git merge ${source} --no-edit`, { cwd: repoPath })
 }
 
+/**
+ * Squash-merge a source branch into a target branch.
+ * This creates a single commit on target with the combined changes,
+ * but the source branch's commits remain orphaned (not ancestors of target).
+ */
+function squashMergeBranch(repoPath: string, target: string, source: string): void {
+	execSync(`git checkout ${target}`, { cwd: repoPath })
+	execSync(`git merge --squash ${source}`, { cwd: repoPath })
+	execSync(`git commit -m "Squash merge ${source}"`, { cwd: repoPath })
+}
+
 // =============================================================================
 // TESTS: validateBranchName
 // =============================================================================
@@ -198,6 +209,29 @@ describe("validateBranchMerged", () => {
 		const badPath = path.join(SANDBOX, "no-repo-here")
 		const result = await validateBranchMerged(badPath, "feature/merged", "main")
 		expect(result.ok).toBe(false)
+	})
+})
+
+describe("validateBranchMerged with squash merge", () => {
+	const repoDir = path.join(SANDBOX, "squash-merge-test-repo")
+
+	beforeAll(() => {
+		fs.mkdirSync(repoDir, { recursive: true })
+		createGitRepo(repoDir, "main")
+		// Create feature branch with commits
+		createCommitOnBranch(repoDir, "feature/squashed", "feat: first squash commit")
+		createCommitOnBranch(repoDir, "feature/squashed", "feat: second squash commit")
+		// Squash-merge it into main
+		squashMergeBranch(repoDir, "main", "feature/squashed")
+	})
+
+	afterAll(() => {
+		fs.rmSync(repoDir, { recursive: true, force: true })
+	})
+
+	test("detects a squash-merged branch via content diff fallback", async () => {
+		const result = await validateBranchMerged(repoDir, "feature/squashed", "main")
+		expect(result.ok).toBe(true)
 	})
 })
 
