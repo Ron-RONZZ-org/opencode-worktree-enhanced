@@ -10,7 +10,14 @@ import * as os from "node:os"
 import { execSync } from "node:child_process"
 
 import { validateBranchName } from "../src/validate"
-import { git, validateWorktreeClean, validateBranchMerged, removeWorktree } from "../src/git"
+import {
+	deleteLocalBranch,
+	getMainRepoRoot,
+	git,
+	removeWorktree,
+	validateBranchMerged,
+	validateWorktreeClean,
+} from "../src/git"
 
 // =============================================================================
 // TEST SANDBOX
@@ -309,6 +316,160 @@ describe("removeWorktree", () => {
 	test("returns err for non-existent worktree path", async () => {
 		const result = await removeWorktree(mainRepo, "/nonexistent/worktree/path")
 		expect(result.ok).toBe(false)
+	})
+})
+
+// =============================================================================
+// TESTS: getMainRepoRoot
+// =============================================================================
+
+describe("getMainRepoRoot", () => {
+	const mainRepo = path.join(SANDBOX, "main-root-test")
+	const worktreesDir = path.join(SANDBOX, "main-root-worktrees")
+	const branch = "feature/main-root"
+	const wtPath = path.join(worktreesDir, "main-root")
+
+	beforeAll(() => {
+		fs.mkdirSync(mainRepo, { recursive: true })
+		createGitRepo(mainRepo, "main")
+		fs.mkdirSync(worktreesDir, { recursive: true })
+		execSync(`git worktree add -b ${branch} ${wtPath} main`, { cwd: mainRepo })
+	})
+
+	afterAll(() => {
+		try {
+			if (fs.existsSync(wtPath)) {
+				execSync(`git worktree remove --force "${wtPath}"`, { cwd: mainRepo })
+			}
+		} catch { /* best-effort */ }
+		fs.rmSync(worktreesDir, { recursive: true, force: true })
+		fs.rmSync(mainRepo, { recursive: true, force: true })
+	})
+
+	test("resolves main repo root from a worktree", async () => {
+		const resolvedRoot = await getMainRepoRoot(wtPath)
+		expect(resolvedRoot).not.toBeNull()
+		// Should resolve to the main repo (not the worktree)
+		expect(resolvedRoot).toBe(mainRepo)
+	})
+
+	test("resolves main repo root from the main repo itself", async () => {
+		const resolvedRoot = await getMainRepoRoot(mainRepo)
+		expect(resolvedRoot).not.toBeNull()
+		expect(resolvedRoot).toBe(mainRepo)
+	})
+
+	test("returns null for a non-repo directory", async () => {
+		const resolvedRoot = await getMainRepoRoot("/nonexistent")
+		expect(resolvedRoot).toBeNull()
+	})
+})
+
+// =============================================================================
+// TESTS: deleteLocalBranch
+// =============================================================================
+
+describe("deleteLocalBranch", () => {
+	const repoDir = path.join(SANDBOX, "delete-branch-test")
+
+	beforeAll(() => {
+		fs.mkdirSync(repoDir, { recursive: true })
+		createGitRepo(repoDir, "main")
+		createCommitOnBranch(repoDir, "feature/delete-me", "feat: to be deleted")
+	})
+
+	afterAll(() => {
+		fs.rmSync(repoDir, { recursive: true, force: true })
+	})
+
+	test("deletes a merged branch", async () => {
+		// Merge the branch into main so it can be safely deleted
+		mergeBranch(repoDir, "main", "feature/delete-me")
+		const result = await deleteLocalBranch(repoDir, "feature/delete-me")
+		expect(result.ok).toBe(true)
+
+		// Confirm the branch is gone
+		const verify = await git(["rev-parse", "--verify", "feature/delete-me"], repoDir)
+		expect(verify.ok).toBe(false)
+	})
+
+	test("refuses to delete an unmerged branch", async () => {
+		createCommitOnBranch(repoDir, "feature/unmerged-delete", "feat: unmerged")
+		const result = await deleteLocalBranch(repoDir, "feature/unmerged-delete")
+		expect(result.ok).toBe(false)
+		// git branch -d can fail because branch is not fully merged,
+		// or because it is currently checked out — either is expected
+		expect(result.error).toBeDefined()
+	})
+
+	test("returns err for non-existent branch", async () => {
+		const result = await deleteLocalBranch(repoDir, "feature/nonexistent")
+		expect(result.ok).toBe(false)
+	})
+})
+
+// =============================================================================
+// TESTS: full worktreeDelete simulation (from a worktree, using mainRepoRoot)
+// =============================================================================
+
+describe("worktreeDelete from worktree via mainRepoRoot", () => {
+	const mainRepo = path.join(SANDBOX, "wt-full-sim-main")
+	const worktreesDir = path.join(SANDBOX, "wt-full-sim-worktrees")
+	const branch = "feature/wt-sim"
+	const wtPath = path.join(worktreesDir, "wt-sim")
+
+	beforeAll(() => {
+		fs.mkdirSync(mainRepo, { recursive: true })
+		createGitRepo(mainRepo, "main")
+		fs.mkdirSync(worktreesDir, { recursive: true })
+		// Create a clean, merged branch
+		execSync(`git checkout -b ${branch}`, { cwd: mainRepo })
+		fs.writeFileSync(path.join(mainRepo, "feature.txt"), "feature work")
+		execSync("git add -A", { cwd: mainRepo })
+		execSync(`git commit -m "feat: work on ${branch}"`, { cwd: mainRepo })
+		// Merge into main
+		execSync("git checkout main", { cwd: mainRepo })
+		execSync(`git merge ${branch} --no-edit`, { cwd: mainRepo })
+		// Create worktree
+		execSync(`git worktree add ${wtPath} ${branch}`, { cwd: mainRepo })
+	})
+
+	afterAll(() => {
+		try {
+			if (fs.existsSync(wtPath)) {
+				execSync(`git worktree remove --force "${wtPath}"`, { cwd: mainRepo })
+			}
+		} catch { /* best-effort */ }
+		fs.rmSync(worktreesDir, { recursive: true, force: true })
+		fs.rmSync(mainRepo, { recursive: true, force: true })
+	})
+
+	test("simulates worktreeDelete from worktree: remove worktree → delete branch — no ENOENT", async () => {
+		// Step 1: Resolve the main repo root FROM the worktree — this is the fix:
+		// using a CWD that NEVER gets deleted (unlike the old code that used wtPath)
+		const mainRoot = await getMainRepoRoot(wtPath)
+		expect(mainRoot).toBe(mainRepo)
+
+		// Step 2: Remove worktree using mainRepoRoot as CWD — this is the critical fix.
+		// In the old code this used wtPath as CWD; after deletion the CWD was invalid.
+		const removeResult = await removeWorktree(mainRoot!, wtPath)
+		expect(removeResult.ok).toBe(true)
+
+		// Step 3: Delete local branch using mainRepoRoot as CWD — still valid because
+		// mainRoot is the parent repo, which was never deleted.
+		const branchResult = await deleteLocalBranch(mainRoot!, branch)
+		expect(branchResult.ok).toBe(true)
+
+		// Verify the worktree directory is gone
+		expect(fs.existsSync(wtPath)).toBe(false)
+
+		// Verify the branch is gone
+		const verifyBranch = await git(["rev-parse", "--verify", branch], mainRoot!)
+		expect(verifyBranch.ok).toBe(false)
+
+		// Verify main repo git operations still work (CWD never went invalid)
+		const statusResult = await git(["status", "--porcelain"], mainRoot!)
+		expect(statusResult.ok).toBe(true)
 	})
 })
 
