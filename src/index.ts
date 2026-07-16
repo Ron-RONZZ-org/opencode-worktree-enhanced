@@ -13,6 +13,7 @@ import {
 	createWorktree,
 	deleteLocalBranch,
 	deleteRemoteBranch,
+	getMainRepoRoot,
 	getWorktreePath,
 	git,
 	listWorktrees,
@@ -255,6 +256,14 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 						return "No worktree associated with this session. Only worktree sessions created via worktreeCreate can be deleted."
 					}
 
+					// Resolve the parent repo root — this NEVER gets deleted during cleanup,
+					// so it provides a stable CWD for all git operations.
+					// (getMainRepoRoot() works from both the main repo and any worktree.)
+					const mainRepoRoot = await getMainRepoRoot(directory)
+					if (!mainRepoRoot) {
+						return "❌ Could not determine the main repository root. Aborting."
+					}
+
 					// ----- Validation phase -----
 					// 1. Worktree must have no uncommitted changes
 					const cleanResult = await validateWorktreeClean(session.path)
@@ -265,7 +274,7 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 					// 2. Branch must be fully merged into main (unless --force)
 					if (!args.force) {
 						const baseBranch = "main"
-						const mergeResult = await validateBranchMerged(directory, session.branch, baseBranch)
+						const mergeResult = await validateBranchMerged(mainRepoRoot, session.branch, baseBranch)
 						if (!mergeResult.ok) {
 							return (
 								`❌ ${mergeResult.error}` +
@@ -281,25 +290,20 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 						await runHooks(session.path, config.hooks.preDelete, log)
 					}
 
-					// Remove worktree directory
-					const removeResult = await removeWorktree(directory, session.path)
-					if (!removeResult.ok) {
-						return `❌ Failed to remove worktree: ${removeResult.error}`
-					}
-
-					// Delete local branch (safe delete — git -d refuses if not merged)
-					const branchResult = await deleteLocalBranch(directory, session.branch)
+					// 1. Delete local branch first (while CWD is valid)
+					const branchResult = await deleteLocalBranch(mainRepoRoot, session.branch)
 					if (!branchResult.ok) {
-						return `⚠️  Worktree removed, but failed to delete branch "${session.branch}": ${branchResult.error}`
+						return `❌ Failed to delete branch "${session.branch}": ${branchResult.error}`
 					}
 
-					// Delete remote branch (best-effort)
+					// 2. Delete remote branch (best-effort — collect errors for the return message)
+					const remoteErrors: string[] = []
 					let remoteDeleted = false
-					const remoteResult = await git(["remote"], directory)
+					const remoteResult = await git(["remote"], mainRepoRoot)
 					if (remoteResult.ok && remoteResult.value.trim()) {
 						const remotes = remoteResult.value.split("\n").filter((r) => r.trim())
 						for (const remote of remotes) {
-							const pushDeleteResult = await deleteRemoteBranch(directory, session.branch, remote)
+							const pushDeleteResult = await deleteRemoteBranch(mainRepoRoot, session.branch, remote)
 							if (pushDeleteResult.ok) {
 								remoteDeleted = true
 							} else {
@@ -311,24 +315,44 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 								) {
 									log.debug(`Remote branch ${remote}/${session.branch} did not exist — skipping`)
 								} else {
+									remoteErrors.push(`${remote}/${session.branch}: ${err}`)
 									log.warn(`Failed to delete remote branch ${remote}/${session.branch}: ${err}`)
 								}
 							}
 						}
 					}
 
-					// Clean up session state
+					// 3. Remove worktree directory (last — after all git ops are done)
+					const removeResult = await removeWorktree(mainRepoRoot, session.path)
+					if (!removeResult.ok) {
+						// Branch(es) are already deleted; clean up session state so the
+						// stale directory doesn't linger in worktreeList.
+						removeSession(db, session.branch)
+						clearPendingDelete(db)
+						const detail = remoteErrors.length ? `, remote branch deletion failed: ${remoteErrors.join("; ")}` : ""
+						return `⚠️  Worktree directory removal failed (local branch already deleted${detail}): ${removeResult.error}`
+					}
+
+					// 4. Always clean up session state
 					removeSession(db, session.branch)
 					clearPendingDelete(db)
 
-					const remoteMsg = remoteDeleted
-						? `\n  - Remote branch deleted: origin/${session.branch}`
-						: ""
-					return [
+					// Build return message
+					const lines: string[] = [
 						`✅ Worktree cleaned up successfully:`,
 						`  - Directory removed: ${session.path}`,
-						`  - Branch deleted: ${session.branch}${remoteMsg}`,
-					].join("\n")
+						`  - Local branch deleted: ${session.branch}`,
+					]
+					if (remoteDeleted) {
+						lines.push(`  - Remote branch deleted: origin/${session.branch}`)
+					}
+					if (remoteErrors.length) {
+						lines.push(
+							`⚠️  Some remote branch deletions failed. You may need to clean up manually:`,
+							...remoteErrors.map((e) => `  - ${e}`),
+						)
+					}
+					return lines.join("\n")
 				},
 			}),
 
