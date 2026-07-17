@@ -22,7 +22,8 @@ Context resolution order (highest priority first):
 It replaces ad-hoc `git worktree` bash commands with a structured workflow:
 1. `worktreeCreate` — Create an isolated worktree + spawn OpenCode in a new terminal
 2. Work in the spawned session
-3. `worktreeDelete` — Validates clean state + merged branch, then removes worktree, deletes local & remote branches
+3. `worktreeDelete` — Validates clean state + merged branch, marks worktree for deferred cleanup
+4. `worktreeCreate` (on any future session) — Triggers actual cleanup of orphaned pending deletes: removes worktree, deletes local & remote branches
 
 Key design principles:
 - **State is shared globally** via a SQLite DB keyed by a stable project ID, so parent and worktree sessions share one state database

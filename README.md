@@ -5,7 +5,7 @@
 ## Features
 
 - **`worktreeCreate`** — Create an isolated git worktree and spawn a new terminal with opencode ready to go
-- **`worktreeDelete`** — Safely delete a worktree with two-tier validation (clean working tree + branch merged check), remote branch cleanup, and a `--force` escape hatch for squash-merged branches
+- **`worktreeDelete`** — Mark a worktree for deferred deletion with two-tier validation (clean working tree + branch merged check). Actual cleanup (remove directory, delete branches) happens on the next `worktreeCreate` call, keeping the session alive and all tools functional. Supports `--force` escape hatch for squash-merged branches.
 - **`worktreeList`** — List all plugin-managed sessions and git worktrees in one view
 - **Cross-platform terminal spawning** — Automatically detects and opens new tabs/windows in Kitty, Alacritty, Ghostty, WezTerm, Warp, Foot, GNOME Terminal, Konsole, XFCE4, Terminal.app, iTerm, Windows Terminal, and more
 - **Shared global state** — A SQLite database keyed by stable project ID ensures parent and worktree sessions always see the same sessions list
@@ -64,11 +64,10 @@ worktreeDelete reason: "squash merged on GitHub" --force  # escape hatch
 1. Finds the worktree associated with the current opencode session
 2. Validates the worktree has no uncommitted changes
 3. Validates the branch is fully merged into `main` (two-tier: ancestry + content diff)
-4. Runs pre-delete hooks
-5. Removes the worktree directory
-6. Deletes the local branch
-7. Best-effort remote branch deletion
-8. Cleans up the session record
+4. Marks the worktree for deletion in the global state DB
+5. Removes the session from the active sessions table
+6. **Does NOT delete the directory or branches** — the session continues to work normally
+7. Actual cleanup (remove directory, delete branches) runs on the next `worktreeCreate` call
 
 ### `worktreeList`
 
@@ -176,6 +175,7 @@ This plugin was originally ported and enhanced from [stevenke1981/opencode-workt
 - **Auto-config** — First-run config creation with helpful comments
 - **Path traversal protection** — Defensive path resolution for all file operations
 - **No external dependencies** beyond opencode plugin API and jsonc-parser
+- **Deferred worktree deletion** — `worktreeDelete` marks for cleanup without touching disk; actual removal happens on next `worktreeCreate`, preventing orphaned sessions
 
 ## License
 

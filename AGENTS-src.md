@@ -8,7 +8,7 @@ Source code for the opencode-worktree-enhanced plugin. All modules live flat in 
 | File | Responsibility |
 |------|---------------|
 | `index.ts` | Plugin entry point — registers `worktreeCreate` / `worktreeDelete` / `worktreeList` tools, config injection, session compaction |
-| `git.ts` | All git operations via array-based `Bun.spawn`: worktree CRUD, branch validation, branch delete, remote cleanup |
+| `git.ts` | All git operations via array-based `Bun.spawn`: worktree CRUD, branch validation, branch delete, remote cleanup, pending worktree cleanup (`cleanupPendingWorktree`) |
 | `terminal.ts` | Cross-platform terminal spawning: tmux, macOS, Linux, Windows, WSL. Auto-detects current terminal emulator |
 | `config.ts` | Loads `.opencode/worktree.jsonc` (JSONC with auto-creation of defaults). Exports `WorktreeConfig` interface |
 | `state.ts` | SQLite session database at `~/.local/share/opencode/plugins/worktree/<project-id>.sqlite` |

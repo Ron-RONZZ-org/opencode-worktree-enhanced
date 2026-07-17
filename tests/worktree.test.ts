@@ -11,6 +11,7 @@ import { execSync } from "node:child_process"
 
 import { validateBranchName } from "../src/validate"
 import {
+	cleanupPendingWorktree,
 	deleteLocalBranch,
 	getMainRepoRoot,
 	git,
@@ -409,28 +410,26 @@ describe("deleteLocalBranch", () => {
 })
 
 // =============================================================================
-// TESTS: full worktreeDelete simulation (from a worktree, using mainRepoRoot)
+// TESTS: cleanupPendingWorktree
 // =============================================================================
 
-describe("worktreeDelete from worktree via mainRepoRoot", () => {
-	const mainRepo = path.join(SANDBOX, "wt-full-sim-main")
-	const worktreesDir = path.join(SANDBOX, "wt-full-sim-worktrees")
-	const branch = "feature/wt-sim"
-	const wtPath = path.join(worktreesDir, "wt-sim")
+describe("cleanupPendingWorktree", () => {
+	const mainRepo = path.join(SANDBOX, "cleanup-pending-main")
+	const worktreesDir = path.join(SANDBOX, "cleanup-pending-wts")
+	const branch = "feature/cleanup-test"
+	const wtPath = path.join(worktreesDir, "cleanup-test")
 
 	beforeAll(() => {
 		fs.mkdirSync(mainRepo, { recursive: true })
 		createGitRepo(mainRepo, "main")
 		fs.mkdirSync(worktreesDir, { recursive: true })
-		// Create a clean, merged branch
+		// Create branch, merge into main, create worktree
 		execSync(`git checkout -b ${branch}`, { cwd: mainRepo })
-		fs.writeFileSync(path.join(mainRepo, "feature.txt"), "feature work")
+		fs.writeFileSync(path.join(mainRepo, "cleanup-feature.txt"), "feature work")
 		execSync("git add -A", { cwd: mainRepo })
-		execSync(`git commit -m "feat: work on ${branch}"`, { cwd: mainRepo })
-		// Merge into main
+		execSync(`git commit -m "feat: cleanup test"`, { cwd: mainRepo })
 		execSync("git checkout main", { cwd: mainRepo })
 		execSync(`git merge ${branch} --no-edit`, { cwd: mainRepo })
-		// Create worktree
 		execSync(`git worktree add ${wtPath} ${branch}`, { cwd: mainRepo })
 	})
 
@@ -444,30 +443,102 @@ describe("worktreeDelete from worktree via mainRepoRoot", () => {
 		fs.rmSync(mainRepo, { recursive: true, force: true })
 	})
 
-	test("simulates worktreeDelete from worktree: remove worktree → delete branch — no ENOENT", async () => {
-		// Step 1: Resolve the main repo root FROM the worktree — this is the fix:
-		// using a CWD that NEVER gets deleted (unlike the old code that used wtPath)
-		const mainRoot = await getMainRepoRoot(wtPath)
-		expect(mainRoot).toBe(mainRepo)
+	test("cleans up a valid worktree: removes directory, deletes branches", async () => {
+		expect(fs.existsSync(wtPath)).toBe(true)
 
-		// Step 2: Remove worktree using mainRepoRoot as CWD — this is the critical fix.
-		// In the old code this used wtPath as CWD; after deletion the CWD was invalid.
-		const removeResult = await removeWorktree(mainRoot!, wtPath)
-		expect(removeResult.ok).toBe(true)
-
-		// Step 3: Delete local branch using mainRepoRoot as CWD — still valid because
-		// mainRoot is the parent repo, which was never deleted.
-		const branchResult = await deleteLocalBranch(mainRoot!, branch)
-		expect(branchResult.ok).toBe(true)
+		const result = await cleanupPendingWorktree(mainRepo, branch, wtPath)
+		expect(result.ok).toBe(true)
+		expect(result.worktreeRemoved).toBe(true)
+		expect(result.localBranchDeleted).toBe(true)
+		// remoteBranchDeleted may be false if there's no remote configured
+		expect(result.errors).toEqual([])
 
 		// Verify the worktree directory is gone
 		expect(fs.existsSync(wtPath)).toBe(false)
 
 		// Verify the branch is gone
+		const verifyBranch = await git(["rev-parse", "--verify", branch], mainRepo)
+		expect(verifyBranch.ok).toBe(false)
+	})
+
+	test("handles non-existent worktree path gracefully", async () => {
+		const fakePath = path.join(worktreesDir, "never-existed")
+		const fakeBranch = "feature/never-existed"
+
+		const result = await cleanupPendingWorktree(mainRepo, fakeBranch, fakePath)
+		// Both the worktree and branch don't exist, but cleanup should not throw.
+		// ok=true means "cleanup completed without hard errors" — there was nothing to remove.
+		expect(result.ok).toBe(true)
+		expect(result.errors).toEqual([])
+		expect(result.worktreeRemoved).toBe(false)
+		expect(result.localBranchDeleted).toBe(false)
+	})
+})
+
+// =============================================================================
+// TESTS: Deferred deletion flow (worktreeDelete → pending → cleanupPendingWorktree)
+// =============================================================================
+
+describe("deferred worktree deletion flow", () => {
+	const mainRepo = path.join(SANDBOX, "deferred-flow-main")
+	const worktreesDir = path.join(SANDBOX, "deferred-flow-wts")
+	const branch = "feature/deferred-flow"
+	const wtPath = path.join(worktreesDir, "deferred-flow")
+
+	beforeAll(() => {
+		fs.mkdirSync(mainRepo, { recursive: true })
+		createGitRepo(mainRepo, "main")
+		fs.mkdirSync(worktreesDir, { recursive: true })
+	})
+
+	afterAll(() => {
+		try {
+			if (fs.existsSync(wtPath)) {
+				execSync(`git worktree remove --force "${wtPath}"`, { cwd: mainRepo })
+			}
+		} catch { /* best-effort */ }
+		fs.rmSync(worktreesDir, { recursive: true, force: true })
+		fs.rmSync(mainRepo, { recursive: true, force: true })
+	})
+
+	test("simulates deferred deletion: directory survives until cleanupPendingWorktree is called", async () => {
+		// Create branch with a commit
+		execSync(`git checkout -b ${branch}`, { cwd: mainRepo })
+		fs.writeFileSync(path.join(mainRepo, "deferred.txt"), "deferred work")
+		execSync("git add -A", { cwd: mainRepo })
+		execSync(`git commit -m "feat: deferred test"`, { cwd: mainRepo })
+		// Merge into main
+		execSync("git checkout main", { cwd: mainRepo })
+		execSync(`git merge ${branch} --no-edit`, { cwd: mainRepo })
+		// Create worktree
+		execSync(`git worktree add ${wtPath} ${branch}`, { cwd: mainRepo })
+
+		expect(fs.existsSync(wtPath)).toBe(true)
+
+		// Simulate worktreeDelete marking pending: resolve mainRepoRoot
+		const mainRoot = await getMainRepoRoot(wtPath)
+		expect(mainRoot).toBe(mainRepo)
+
+		// "worktreeDelete" runs, but the directory is NOT removed.
+		// The test simulates the pending delete by NOT calling removeWorktree yet.
+		// Directory still exists — tools would continue to work.
+		expect(fs.existsSync(wtPath)).toBe(true)
+
+		// Simulate the "next session" calling cleanupPendingWorktree
+		const result = await cleanupPendingWorktree(mainRoot!, branch, wtPath)
+		expect(result.ok).toBe(true)
+		expect(result.worktreeRemoved).toBe(true)
+		expect(result.localBranchDeleted).toBe(true)
+		expect(result.errors).toEqual([])
+
+		// Directory is now truly gone
+		expect(fs.existsSync(wtPath)).toBe(false)
+
+		// Branch is gone
 		const verifyBranch = await git(["rev-parse", "--verify", branch], mainRoot!)
 		expect(verifyBranch.ok).toBe(false)
 
-		// Verify main repo git operations still work (CWD never went invalid)
+		// Main repo still works
 		const statusResult = await git(["status", "--porcelain"], mainRoot!)
 		expect(statusResult.ok).toBe(true)
 	})
