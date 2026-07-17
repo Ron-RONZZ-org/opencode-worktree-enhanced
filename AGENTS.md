@@ -17,7 +17,7 @@ Context resolution order (highest priority first):
 ---
 ## Project Overview
 
-**opencode-worktree-enhanced** is a standalone [opencode](https://github.com/Ron-RONZZ-org/opencode) plugin that provides three dedicated tools (`worktreeCreate`, `worktreeDelete`, `worktreeList`) for managing git worktrees with validation, remote cleanup, and cross-platform terminal spawning.
+**opencode-worktree-enhanced** is a standalone [opencode](https://github.com/anomalyco/opencode) plugin that provides three dedicated tools (`worktreeCreate`, `worktreeDelete`, `worktreeList`) for managing git worktrees with validation, remote cleanup, and cross-platform terminal spawning.
 
 It replaces ad-hoc `git worktree` bash commands with a structured workflow:
 1. `worktreeCreate` — Create an isolated worktree + spawn OpenCode in a new terminal
@@ -133,3 +133,8 @@ Root AGENTS.md (global rules)
 ```
 
 Local rules override global rules. Module-level files focus on domain-specific behavior, constraints, and invariants.
+
+## References
+
+For doc on opencode APIs, etc.: https://opencode.ai/docs
+For opencode source code: https://github.com/anomalyco/opencode
