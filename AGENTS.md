@@ -138,3 +138,6 @@ Local rules override global rules. Module-level files focus on domain-specific b
 
 For doc on opencode APIs, etc.: https://opencode.ai/docs
 For opencode source code: https://github.com/anomalyco/opencode
+For inspirations, see source code of similar plugin: https://github.com/stevenke1981/opencode-worktree-tools
+  - this is the inspiration for our plug-in
+  - be critical: their implementation have limitations. We can often do better.
