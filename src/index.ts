@@ -10,14 +10,11 @@ import { type Plugin, tool } from "@opencode-ai/plugin"
 
 import { loadWorktreeConfig } from "./config"
 import {
+	cleanupPendingWorktree,
 	createWorktree,
-	deleteLocalBranch,
-	deleteRemoteBranch,
 	getMainRepoRoot,
 	getWorktreePath,
-	git,
 	listWorktrees,
-	removeWorktree,
 	validateBranchMerged,
 	validateWorktreeClean,
 } from "./git"
@@ -45,13 +42,13 @@ You have dedicated Git worktree tools. Prefer them over raw \`git worktree\` bas
 | Tool | Use when |
 |------|----------|
 | \`worktreeCreate\` | Create an isolated worktree + spawn OpenCode in a new terminal |
-| \`worktreeDelete\` | Validate and delete the current worktree (enforces clean state + merged branch) |
+| \`worktreeDelete\` | Mark current worktree for deferred cleanup. Validates clean state + merged branch, then defers actual deletion (directory + branches) to the next \`worktreeCreate\` call. |
 | \`worktreeList\` | List active plugin-managed worktree sessions and git worktrees |
 
 Workflow:
 1. \`worktreeCreate\` with a branch name (e.g. feature/dark-mode)
 2. Work in the spawned isolated terminal session
-3. \`worktreeDelete\` with a reason when done — validates clean state and merged branch first
+3. \`worktreeDelete\` with a reason when done — validates clean state and merged branch, marks for deferred cleanup (directory stays until session ends, actual removal happens on next \`worktreeCreate\`)
 
 Config: \`.opencode/worktree.jsonc\` (auto-created) controls sync, hooks, terminal mode (\`newTerminal\`), and session history (\`preserveHistory\`).
 Storage: ~/.local/share/opencode/worktree/<project-name>/<branch>/
@@ -169,6 +166,42 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 
 					const config = await loadWorktreeConfig(directory, log)
 
+					// Clean up any orphaned pending worktree deletions before creating a new one.
+					// Uses the global DB, so this works from any session (parent or worktree).
+					const mainRepoRoot = await getMainRepoRoot(directory)
+					if (mainRepoRoot) {
+						const pending = getPendingDelete(db)
+						if (pending) {
+							const existingSession = getSessionByPath(db, pending.path)
+							if (!existingSession) {
+								log.info(`Cleaning up pending worktree: ${pending.branch}`)
+								const cleanupResult = await cleanupPendingWorktree(
+									mainRepoRoot,
+									pending.branch,
+									pending.path,
+									(msg) => log.info(msg),
+								)
+								if (cleanupResult.worktreeRemoved) {
+									log.info(`  Removed worktree: ${pending.path}`)
+								}
+								if (cleanupResult.localBranchDeleted) {
+									log.info(`  Deleted local branch: ${pending.branch}`)
+								}
+								if (cleanupResult.remoteBranchDeleted) {
+									log.info(`  Deleted remote branch: ${pending.branch}`)
+								}
+								if (cleanupResult.errors.length) {
+									for (const err of cleanupResult.errors) {
+										log.warn(`  Cleanup warning: ${err}`)
+									}
+								}
+								clearPendingDelete(db)
+							} else {
+								log.debug("Pending worktree still has active session — skipping cleanup")
+							}
+						}
+					}
+
 					const result = await createWorktree(
 						directory,
 						args.branch,
@@ -219,7 +252,10 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 
 			worktreeDelete: tool({
 				description:
-					"Validate and delete the current worktree. Refuses if worktree is dirty. Also refuses if branch is not merged into main (unless --force is set). Removes local and remote branch on success.",
+					"Mark the current worktree for cleanup. Validates clean state and merge status, " +
+					"then marks the worktree for deletion. Actual cleanup (remove directory, delete branches) " +
+					"happens on the next worktreeCreate call. This keeps the session directory alive " +
+					"so all tools continue to work.",
 				args: {
 					reason: tool.schema
 						.string()
@@ -256,15 +292,13 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 						return "No worktree associated with this session. Only worktree sessions created via worktreeCreate can be deleted."
 					}
 
-					// Resolve the parent repo root — this NEVER gets deleted during cleanup,
-					// so it provides a stable CWD for all git operations.
-					// (getMainRepoRoot() works from both the main repo and any worktree.)
+					// Resolve the parent repo root — stable CWD for validation.
 					const mainRepoRoot = await getMainRepoRoot(directory)
 					if (!mainRepoRoot) {
 						return "❌ Could not determine the main repository root. Aborting."
 					}
 
-					// ----- Validation phase -----
+					// ----- Validation phase (no deletion) -----
 					// 1. Worktree must have no uncommitted changes
 					const cleanResult = await validateWorktreeClean(session.path)
 					if (!cleanResult.ok) {
@@ -284,75 +318,16 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 						}
 					}
 
-					// ----- Cleanup phase -----
-					const config = await loadWorktreeConfig(directory, log)
-					if (config.hooks.preDelete.length) {
-						await runHooks(session.path, config.hooks.preDelete, log)
-					}
-
-					// 1. Remove worktree directory first (using mainRepoRoot as stable CWD)
-					//    The branch is checked out in this worktree — git branch -d will refuse
-					//    to delete it until the worktree is gone.
-					const removeResult = await removeWorktree(mainRepoRoot, session.path)
-					if (!removeResult.ok) {
-						return `❌ Failed to remove worktree: ${removeResult.error}`
-					}
-
-					// 2. Delete local branch (safe delete — git -d refuses if not merged)
-					const branchResult = await deleteLocalBranch(mainRepoRoot, session.branch)
-					if (!branchResult.ok) {
-						// Session cleanup still needed — directory is already gone
-						removeSession(db, session.branch)
-						clearPendingDelete(db)
-						return `⚠️  Worktree removed, but failed to delete branch "${session.branch}": ${branchResult.error}`
-					}
-
-					// 3. Delete remote branch (best-effort — collect errors for the return message)
-					const remoteErrors: string[] = []
-					let remoteDeleted = false
-					const remoteResult = await git(["remote"], mainRepoRoot)
-					if (remoteResult.ok && remoteResult.value.trim()) {
-						const remotes = remoteResult.value.split("\n").filter((r) => r.trim())
-						for (const remote of remotes) {
-							const pushDeleteResult = await deleteRemoteBranch(mainRepoRoot, session.branch, remote)
-							if (pushDeleteResult.ok) {
-								remoteDeleted = true
-							} else {
-								const err = pushDeleteResult.error ?? ""
-								if (
-									err.includes("remote ref does not exist") ||
-									err.includes("could not delete") ||
-									err.includes("not match")
-								) {
-									log.debug(`Remote branch ${remote}/${session.branch} did not exist — skipping`)
-								} else {
-									remoteErrors.push(`${remote}/${session.branch}: ${err}`)
-									log.warn(`Failed to delete remote branch ${remote}/${session.branch}: ${err}`)
-								}
-							}
-						}
-					}
-
-					// 4. Always clean up session state
+					// ----- Mark pending (no disk operations) -----
+					setPendingDelete(db, { branch: session.branch, path: session.path })
 					removeSession(db, session.branch)
-					clearPendingDelete(db)
 
-					// Build return message
-					const lines: string[] = [
-						`✅ Worktree cleaned up successfully:`,
-						`  - Directory removed: ${session.path}`,
-						`  - Local branch deleted: ${session.branch}`,
-					]
-					if (remoteDeleted) {
-						lines.push(`  - Remote branch deleted: origin/${session.branch}`)
-					}
-					if (remoteErrors.length) {
-						lines.push(
-							`⚠️  Some remote branch deletions failed. You may need to clean up manually:`,
-							...remoteErrors.map((e) => `  - ${e}`),
-						)
-					}
-					return lines.join("\n")
+					return [
+						`✅ Worktree "${session.branch}" marked for cleanup.`,
+						`  - Directory: ${session.path}`,
+						`  - All tools continue to work in this session.`,
+						`  - Cleanup will run on the next \`worktreeCreate\` call.`,
+					].join("\n")
 				},
 			}),
 

@@ -243,3 +243,102 @@ export async function deleteRemoteBranch(
 ): Promise<Result<string>> {
 	return git(["push", remote, "--delete", branch], repoRoot)
 }
+
+// =============================================================================
+// PENDING WORKTREE CLEANUP
+// =============================================================================
+
+/** Result of a pending worktree cleanup operation. */
+export interface CleanupResult {
+	/** True if at least one step succeeded. */
+	ok: boolean
+	/** Whether the worktree directory was removed. */
+	worktreeRemoved: boolean
+	/** Whether the local branch was deleted. */
+	localBranchDeleted: boolean
+	/** Whether the remote branch was deleted (at least one remote). */
+	remoteBranchDeleted: boolean
+	/** Non-fatal errors collected during cleanup. */
+	errors: string[]
+}
+
+/**
+ * Clean up a worktree that was previously marked for pending deletion.
+ *
+ * Best-effort: attempts to remove the worktree directory, delete local branch,
+ * and delete remote branches. Continues on failure — partial cleanup is still
+ * useful (e.g., worktree removed but branch left behind is easy to fix).
+ *
+ * All git commands use `mainRepoRoot` as CWD so they never fail due to
+ * the worktree directory being removed mid-operation.
+ */
+export async function cleanupPendingWorktree(
+	mainRepoRoot: string,
+	branch: string,
+	worktreePath: string,
+	log?: (msg: string) => void,
+): Promise<CleanupResult> {
+	const errors: string[] = []
+
+	// 1. Remove worktree directory
+	const removeResult = await removeWorktree(mainRepoRoot, worktreePath)
+	const worktreeRemoved = removeResult.ok
+	if (!worktreeRemoved && removeResult.error) {
+		// "not a valid worktree" means it's already gone — not an error
+		if (
+			!removeResult.error.includes("not a working tree") &&
+			!removeResult.error.includes("not a valid worktree") &&
+			!removeResult.error.includes("does not exist")
+		) {
+			errors.push(`Worktree removal: ${removeResult.error}`)
+		} else {
+			log?.("Worktree already gone — skipping")
+		}
+	}
+
+	// 2. Delete local branch (safe delete — git -d refuses if not merged)
+	const branchResult = await deleteLocalBranch(mainRepoRoot, branch)
+	const localBranchDeleted = branchResult.ok
+	if (!localBranchDeleted && branchResult.error) {
+		if (
+			!branchResult.error.includes("not found") &&
+			!branchResult.error.includes("did not match")
+		) {
+			errors.push(`Local branch deletion: ${branchResult.error}`)
+		} else {
+			log?.("Branch already gone — skipping")
+		}
+	}
+
+	// 3. Delete remote branches (best-effort)
+	let remoteBranchDeleted = false
+	const remoteResult = await git(["remote"], mainRepoRoot)
+	if (remoteResult.ok && remoteResult.value.trim()) {
+		const remotes = remoteResult.value.split("\n").filter((r) => r.trim())
+		for (const remote of remotes) {
+			const pushDeleteResult = await deleteRemoteBranch(mainRepoRoot, branch, remote)
+			if (pushDeleteResult.ok) {
+				remoteBranchDeleted = true
+			} else {
+				const err = pushDeleteResult.error ?? ""
+				if (
+					err.includes("remote ref does not exist") ||
+					err.includes("could not delete") ||
+					err.includes("not match")
+				) {
+					log?.(`Remote branch ${remote}/${branch} did not exist — skipping`)
+				} else {
+					errors.push(`Remote branch deletion (${remote}/${branch}): ${err}`)
+				}
+			}
+		}
+	}
+
+	return {
+		ok: worktreeRemoved || localBranchDeleted || errors.length === 0,
+		worktreeRemoved,
+		localBranchDeleted,
+		remoteBranchDeleted,
+		errors,
+	}
+}
