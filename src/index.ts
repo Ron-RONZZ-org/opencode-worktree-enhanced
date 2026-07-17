@@ -355,6 +355,12 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 						}
 					}
 
+					// Show pending deletions — worktrees marked for cleanup but not yet removed.
+					const pending = getPendingDelete(db)
+					if (pending) {
+						lines.push("", "## Pending cleanup", `- ${pending.branch} → ${pending.path} (deletion deferred)`)
+					}
+
 					if (args.includeGit) {
 						lines.push("", "## Git worktrees")
 						lines.push(await listWorktrees(directory))
