@@ -58,16 +58,19 @@ worktreeCreate branch: "feature/my-feature" baseBranch: "main"
 
 ```txt
 worktreeDelete reason: "PR merged, cleaning up"
+worktreeDelete branch: "feature/my-feature" reason: "cleaning from parent session"
 worktreeDelete reason: "squash merged on GitHub" --force  # escape hatch
 ```
 
-1. Finds the worktree associated with the current opencode session
+1. Finds the worktree by **branch name** (if `branch` arg is provided) or by the current opencode session directory
 2. Validates the worktree has no uncommitted changes
 3. Validates the branch is fully merged into `main` (two-tier: ancestry + content diff)
 4. Marks the worktree for deletion in the global state DB
 5. Removes the session from the active sessions table
 6. **Does NOT delete the directory or branches** — the session continues to work normally
 7. Actual cleanup (remove directory, delete branches) runs on the next `worktreeCreate` call
+
+**Important**: Never use `rm -rf` on a worktree directory — this orphans the active opencode session. Always use `worktreeDelete`.
 
 ### `worktreeList`
 
