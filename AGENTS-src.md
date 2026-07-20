@@ -11,7 +11,7 @@ Source code for the opencode-worktree-enhanced plugin. All modules live flat in 
 | `git.ts` | All git operations via array-based `Bun.spawn`: worktree CRUD, branch validation, branch delete, remote cleanup, pending worktree cleanup (`cleanupPendingWorktree`) |
 | `terminal.ts` | Cross-platform terminal spawning: tmux, macOS, Linux, Windows, WSL. Auto-detects current terminal emulator |
 | `config.ts` | Loads `.opencode/worktree.jsonc` (JSONC with auto-creation of defaults). Exports `WorktreeConfig` interface |
-| `state.ts` | SQLite session database at `~/.local/share/opencode/plugins/worktree/<project-id>.sqlite` |
+| `state.ts` | SQLite session database at `~/.local/share/opencode/plugins/worktree/<project-id>.sqlite`. CRUD: `addSession`, `getSession`, `getSessionByPath`, `getSessionByBranch`, `getAllSessions`, `removeSession`, `setPendingDelete`, `getPendingDelete`, `clearPendingDelete` |
 | `project-id.ts` | Stable, deterministic project ID computed from git root commit SHA or path hash — same from any worktree |
 | `sync.ts` | File copy, directory symlink, and hook execution from main worktree to new worktree |
 | `validate.ts` | Git branch name validation — blocks control chars, shell metacharacters, git ref special chars |
