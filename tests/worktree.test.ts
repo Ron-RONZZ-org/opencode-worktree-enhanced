@@ -709,6 +709,11 @@ describe("getSessionByBranch", () => {
 		expect(result!.path).toBe("/tmp/worktrees/duplicate-1")
 	})
 
+	test("returns null for empty branch name", () => {
+		const result = getSessionByBranch(db, "")
+		expect(result).toBeNull()
+	})
+
 	test("returns null after session is removed", () => {
 		removeSession(db, "feature/my-feature")
 		const result = getSessionByBranch(db, "feature/my-feature")
