@@ -4,6 +4,7 @@
  * Run with: bun test tests/
  */
 import { describe, expect, test, beforeAll, afterAll } from "bun:test"
+import { Database } from "bun:sqlite"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import * as os from "node:os"
@@ -19,6 +20,13 @@ import {
 	validateBranchMerged,
 	validateWorktreeClean,
 } from "../src/git"
+import {
+	addSession,
+	getAllSessions,
+	getSessionByBranch,
+	getSessionByPath,
+	removeSession,
+} from "../src/state"
 
 // =============================================================================
 // TEST SANDBOX
@@ -616,5 +624,183 @@ describe("end-to-end: clean + unmerged fails merge validation", () => {
 		const merged = await validateBranchMerged(repoDir, "feature/clean-unmerged", "main")
 		expect(merged.ok).toBe(false)
 		expect(merged.error).toContain("NOT fully merged")
+	})
+})
+
+// =============================================================================
+// TESTS: state.ts — getSessionByBranch
+// =============================================================================
+
+describe("getSessionByBranch", () => {
+	const dbPath = path.join(SANDBOX, "state-test.sqlite")
+	let db: Database
+
+	beforeAll(() => {
+		fs.mkdirSync(path.dirname(dbPath), { recursive: true })
+		db = new Database(dbPath)
+		db.run("PRAGMA journal_mode=WAL")
+		db.run(`CREATE TABLE IF NOT EXISTS sessions (
+			id TEXT PRIMARY KEY,
+			branch TEXT NOT NULL,
+			path TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		)`)
+		db.run(`CREATE TABLE IF NOT EXISTS pending_delete (
+			branch TEXT PRIMARY KEY,
+			path TEXT NOT NULL
+		)`)
+	})
+
+	afterAll(() => {
+		db.close()
+		fs.rmSync(dbPath, { force: true })
+	})
+
+	test("returns null for empty database", () => {
+		const result = getSessionByBranch(db, "feature/nonexistent")
+		expect(result).toBeNull()
+	})
+
+	test("finds a session by branch name", () => {
+		addSession(db, {
+			id: "test-session-1",
+			branch: "feature/my-feature",
+			path: "/tmp/worktrees/my-feature",
+			createdAt: "2025-01-01T00:00:00Z",
+		})
+		const result = getSessionByBranch(db, "feature/my-feature")
+		expect(result).not.toBeNull()
+		expect(result!.id).toBe("test-session-1")
+		expect(result!.branch).toBe("feature/my-feature")
+		expect(result!.path).toBe("/tmp/worktrees/my-feature")
+		expect(result!.createdAt).toBe("2025-01-01T00:00:00Z")
+	})
+
+	test("returns null for non-matching branch", () => {
+		const result = getSessionByBranch(db, "feature/other-branch")
+		expect(result).toBeNull()
+	})
+
+	test("findSessionByBranch and getSessionByPath return the same session", () => {
+		const byBranch = getSessionByBranch(db, "feature/my-feature")
+		const byPath = getSessionByPath(db, "/tmp/worktrees/my-feature")
+		expect(byBranch).not.toBeNull()
+		expect(byPath).not.toBeNull()
+		expect(byBranch!.id).toBe(byPath!.id)
+		expect(byBranch!.branch).toBe(byPath!.branch)
+	})
+
+	test("returns first matching session when multiple sessions share a branch", () => {
+		addSession(db, {
+			id: "test-session-duplicate",
+			branch: "feature/duplicate",
+			path: "/tmp/worktrees/duplicate-1",
+			createdAt: "2025-01-01T00:00:00Z",
+		})
+		addSession(db, {
+			id: "test-session-duplicate-2",
+			branch: "feature/duplicate",
+			path: "/tmp/worktrees/duplicate-2",
+			createdAt: "2025-01-02T00:00:00Z",
+		})
+		const result = getSessionByBranch(db, "feature/duplicate")
+		expect(result).not.toBeNull()
+		// Should return the first inserted row
+		expect(result!.path).toBe("/tmp/worktrees/duplicate-1")
+	})
+
+	test("returns null after session is removed", () => {
+		removeSession(db, "feature/my-feature")
+		const result = getSessionByBranch(db, "feature/my-feature")
+		expect(result).toBeNull()
+	})
+})
+
+// =============================================================================
+// TESTS: Cross-session deletion scenario (worktreeDelete with branch param)
+// =============================================================================
+
+describe("cross-session worktreeDelete scenario", () => {
+	const mainRepo = path.join(SANDBOX, "cross-session-main")
+	const worktreesDir = path.join(SANDBOX, "cross-session-wts")
+	const branch = "feature/cross-session-test"
+	const wtPath = path.join(worktreesDir, "cross-session-test")
+
+	beforeAll(() => {
+		fs.mkdirSync(mainRepo, { recursive: true })
+		createGitRepo(mainRepo, "main")
+		fs.mkdirSync(worktreesDir, { recursive: true })
+		// Create feature branch with a commit, merge into main
+		execSync(`git checkout -b ${branch}`, { cwd: mainRepo })
+		fs.writeFileSync(path.join(mainRepo, "cross-session.txt"), "cross-session work")
+		execSync("git add -A", { cwd: mainRepo })
+		execSync(`git commit -m "feat: cross-session test"`, { cwd: mainRepo })
+		execSync("git checkout main", { cwd: mainRepo })
+		execSync(`git merge ${branch} --no-edit`, { cwd: mainRepo })
+		// Create worktree
+		execSync(`git worktree add ${wtPath} ${branch}`, { cwd: mainRepo })
+	})
+
+	afterAll(() => {
+		try {
+			if (fs.existsSync(wtPath)) {
+				execSync(`git worktree remove --force "${wtPath}"`, { cwd: mainRepo })
+			}
+		} catch { /* best-effort */ }
+		fs.rmSync(worktreesDir, { recursive: true, force: true })
+		fs.rmSync(mainRepo, { recursive: true, force: true })
+	})
+
+	test("simulates finding a worktree via branch and cleaning it up", async () => {
+		// Simulate what worktreeCreate would do: add session to DB
+		const dbPath = path.join(SANDBOX, "cross-session-db.sqlite")
+		const db = new Database(dbPath)
+		db.run("PRAGMA journal_mode=WAL")
+		db.run(`CREATE TABLE IF NOT EXISTS sessions (
+			id TEXT PRIMARY KEY,
+			branch TEXT NOT NULL,
+			path TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		)`)
+		db.run(`CREATE TABLE IF NOT EXISTS pending_delete (
+			branch TEXT PRIMARY KEY,
+			path TEXT NOT NULL
+		)`)
+
+		// In the real flow, worktreeCreate would call addSession()
+		addSession(db, {
+			id: "cross-session-wt",
+			branch,
+			path: wtPath,
+			createdAt: new Date().toISOString(),
+		})
+
+		// Verify we can find it by branch (simulating the parent session's worktreeDelete call)
+		const found = getSessionByBranch(db, branch)
+		expect(found).not.toBeNull()
+		expect(found!.branch).toBe(branch)
+		expect(found!.path).toBe(wtPath)
+		expect(found!.id).toBe("cross-session-wt")
+
+		// Validate the worktree is clean
+		const cleanResult = await validateWorktreeClean(wtPath)
+		expect(cleanResult.ok).toBe(true)
+
+		// Validate the branch is merged into main
+		const mergeResult = await validateBranchMerged(mainRepo, branch, "main")
+		expect(mergeResult.ok).toBe(true)
+
+		// Simulate the actual cleanup (what cleanupPendingWorktree does)
+		const cleanupResult = await cleanupPendingWorktree(mainRepo, branch, wtPath)
+		expect(cleanupResult.ok).toBe(true)
+		expect(cleanupResult.worktreeRemoved).toBe(true)
+		expect(cleanupResult.localBranchDeleted).toBe(true)
+		expect(cleanupResult.errors).toEqual([])
+
+		// Verify the worktree directory is gone
+		expect(fs.existsSync(wtPath)).toBe(false)
+
+		db.close()
+		fs.rmSync(dbPath, { force: true })
 	})
 })

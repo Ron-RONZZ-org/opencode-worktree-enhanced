@@ -123,6 +123,21 @@ export function getSessionByPath(
 	}
 }
 
+/** Get a session by branch name. */
+export function getSessionByBranch(
+	db: Database,
+	branch: string,
+): Session | null {
+	const row = db.query("SELECT id, branch, path, created_at FROM sessions WHERE branch = ?").get(branch) as Record<string, unknown> | null
+	if (!row) return null
+	return {
+		id: String(row.id),
+		branch: String(row.branch),
+		path: String(row.path),
+		createdAt: String(row.created_at),
+	}
+}
+
 /** Get all sessions. */
 export function getAllSessions(
 	db: Database,

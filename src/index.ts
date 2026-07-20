@@ -24,6 +24,7 @@ import {
 	getAllSessions,
 	getPendingDelete,
 	getSession,
+	getSessionByBranch,
 	getSessionByPath,
 	initStateDb,
 	removeSession,
@@ -42,13 +43,16 @@ You have dedicated Git worktree tools. Prefer them over raw \`git worktree\` bas
 | Tool | Use when |
 |------|----------|
 | \`worktreeCreate\` | Create an isolated worktree + spawn OpenCode in a new terminal |
-| \`worktreeDelete\` | Mark current worktree for deferred cleanup. Validates clean state + merged branch, then defers actual deletion (directory + branches) to the next \`worktreeCreate\` call. |
+| \`worktreeDelete\` | Mark a worktree for deferred cleanup. Validates clean state + merged branch, then defers actual deletion (directory + branches) to the next \`worktreeCreate\` call. Use with a \`branch\` to delete from any session (not just the current worktree). |
 | \`worktreeList\` | List active plugin-managed worktree sessions and git worktrees |
 
 Workflow:
 1. \`worktreeCreate\` with a branch name (e.g. feature/dark-mode)
 2. Work in the spawned isolated terminal session
 3. \`worktreeDelete\` with a reason when done — validates clean state and merged branch, marks for deferred cleanup (directory stays until session ends, actual removal happens on next \`worktreeCreate\`)
+4. To delete from a different session, provide the branch name: \`worktreeDelete(branch: "feature/my-feature", reason: "done")\`
+
+**IMPORTANT**: Never use \`rm -rf\` on a worktree directory — this orphans the active opencode session and can cause data loss. Always use \`worktreeDelete\`.
 
 Config: \`.opencode/worktree.jsonc\` (auto-created) controls sync, hooks, terminal mode (\`newTerminal\`), and session history (\`preserveHistory\`).
 Storage: ~/.local/share/opencode/worktree/<project-name>/<branch>/
@@ -118,7 +122,7 @@ export const WorktreeEnhancedPlugin: Plugin = async ({ client, directory, $ }) =
 			)
 			if (!hasMarker) {
 				config.instructions.push(
-					`${PLUGIN_MARKER}: prefer worktreeCreate/worktreeDelete/worktreeList over raw git worktree bash`,
+					`${PLUGIN_MARKER}: prefer worktreeCreate/worktreeDelete/worktreeList over raw git worktree bash. Never use \`rm -rf\` on worktree directories — always use worktreeDelete.`,
 				)
 			}
 		},
@@ -138,6 +142,7 @@ export const WorktreeEnhancedPlugin: Plugin = async ({ client, directory, $ }) =
 ## Worktree Tools (${PLUGIN_MARKER})
 Prefer: worktreeCreate, worktreeDelete, worktreeList.
 Never use raw \`git worktree add/remove\` when plugin tools are available.
+**Never use \`rm -rf\` on a worktree directory** — always use worktreeDelete.
 Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, hooks)
 `)
 		},
@@ -252,14 +257,23 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 
 			worktreeDelete: tool({
 				description:
-					"Mark the current worktree for cleanup. Validates clean state and merge status, " +
+					"Mark a worktree for deferred cleanup. Validates clean state and merge status, " +
 					"then marks the worktree for deletion. Actual cleanup (remove directory, delete branches) " +
 					"happens on the next worktreeCreate call. This keeps the session directory alive " +
-					"so all tools continue to work.",
+					"so all tools continue to work. " +
+					"Provide a `branch` to delete a worktree from ANY session (not just the current one). " +
+					"Never use `rm -rf` on a worktree directory.",
 				args: {
 					reason: tool.schema
 						.string()
 						.describe("Brief explanation of why you are calling this tool"),
+					branch: tool.schema
+						.string()
+						.optional()
+						.describe(
+							"Branch name to delete (omit to delete the current session's worktree). " +
+							"Use this from a parent/other session to clean up a worktree found via worktreeList.",
+						),
 					force: tool.schema
 						.boolean()
 						.optional()
@@ -272,24 +286,38 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 				async execute(args, toolCtx) {
 					if (!db || !inRepo) return "Not in a git repository."
 
-					// Find worktree by matching the current session's directory
-					let worktreePath: string | null = null
-					try {
-						const sessionInfo = await client.session.get({ path: { id: toolCtx.sessionID } })
-						if (sessionInfo.data?.directory) {
-							worktreePath = sessionInfo.data.directory
-						}
-					} catch {
-						// fall through
-					}
+					// Resolve session — by branch name if provided, otherwise by current directory
+					let session = args.branch
+						? getSessionByBranch(db, args.branch)
+						: null
 
-					if (!worktreePath) {
-						return "No worktree associated with this session. Only worktree sessions created via worktreeCreate can be deleted."
-					}
-
-					const session = getSessionByPath(db, worktreePath)
 					if (!session) {
-						return "No worktree associated with this session. Only worktree sessions created via worktreeCreate can be deleted."
+						// Fall back to current-session detection
+						let worktreePath: string | null = null
+						try {
+							const sessionInfo = await client.session.get({ path: { id: toolCtx.sessionID } })
+							if (sessionInfo.data?.directory) {
+								worktreePath = sessionInfo.data.directory
+							}
+						} catch {
+							// fall through
+						}
+
+						if (worktreePath) {
+							session = getSessionByPath(db, worktreePath)
+						}
+					}
+
+					if (!session) {
+						const branchHint = args.branch
+							? ` Branch "${args.branch}" was not found in the session database.`
+							: ""
+						return (
+							"No worktree session found. Only worktrees created via worktreeCreate can be deleted." +
+							branchHint +
+							"\n\nUse `worktreeList` to see all plugin-managed worktree sessions. " +
+							"Never use `rm -rf` on a worktree directory."
+						)
 					}
 
 					// Resolve the parent repo root — stable CWD for validation.
