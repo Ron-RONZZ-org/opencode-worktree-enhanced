@@ -221,6 +221,18 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 
 					const worktreePath = result.value
 
+					// Register session IMMEDIATELY after worktree creation, before
+					// any subsequent operations (sync, hooks, terminal spawn).
+					// This ensures the session is in the DB even if openTerminal
+					// fails or the tool call is interrupted — preventing a worktree
+					// from existing without a DB record.
+					addSession(db, {
+						id: `wt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+						branch: args.branch,
+						path: worktreePath,
+						createdAt: new Date().toISOString(),
+					})
+
 					// Sync files from main worktree
 					if (config.sync.copyFiles.length) {
 						await copyFiles(directory, worktreePath, config.sync.copyFiles, log)
@@ -238,18 +250,11 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 
 					if (!terminalResult.success) {
 						return [
-							`⚠️  Worktree created at ${worktreePath}`,
+							`⚠️  Worktree created at ${worktreePath} — session registered.`,
 							`Terminal spawn failed: ${terminalResult.error ?? "unknown error"}`,
 							"Run `opencode .` manually in the worktree directory.",
 						].join("\n")
 					}
-
-					addSession(db, {
-						id: `wt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-						branch: args.branch,
-						path: worktreePath,
-						createdAt: new Date().toISOString(),
-					})
 
 					return [
 						`✅ Worktree created at ${worktreePath}`,
