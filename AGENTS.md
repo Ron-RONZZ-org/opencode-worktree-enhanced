@@ -22,7 +22,7 @@ Context resolution order (highest priority first):
 It replaces ad-hoc `git worktree` bash commands with a structured workflow:
 1. `worktreeCreate` — Create an isolated worktree + spawn OpenCode in a new terminal
 2. Work in the spawned session
-3. `worktreeDelete` — Validates clean state + merged branch, marks worktree for deferred cleanup
+3. `worktreeDelete` — Validates clean state + merged branch, marks worktree for deferred cleanup. **`branch` is always required** — there is no path-based fallback.
 4. `worktreeCreate` (on any future session) — Triggers actual cleanup of orphaned pending deletes: removes worktree, deletes local & remote branches
 
 Key design principles:
