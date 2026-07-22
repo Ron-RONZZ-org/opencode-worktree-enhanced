@@ -36,3 +36,10 @@ All tests live in `tests/worktree.test.ts`. Each `describe` block creates its ow
 | `end-to-end: clean + merged` | Both validations pass |
 | `end-to-end: dirty + merged` | Clean fails, merged passes |
 | `end-to-end: clean + unmerged` | Clean passes, merged fails |
+| `getSessionByBranch` | Session CRUD: insert, find by branch, find by path, duplicates, empty name, remove |
+| `deferred worktree deletion flow` | Full flow: create worktree → mark pending → cleanup actually removes |
+| `cross-session worktreeDelete scenario` | Simulates finding a worktree by branch from a different session and cleaning it up |
+
+## Key Design Invariant
+
+**`worktreeDelete` always requires a `branch` parameter.** There is no path-based fallback or "current session" detection. Session lookup always uses `getSessionByBranch()`. This is intentional — it eliminates ambiguity about which worktree to delete when calling from a parent session. To discover active branches, call `worktreeList` first.

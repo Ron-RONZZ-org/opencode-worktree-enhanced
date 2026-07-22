@@ -25,6 +25,7 @@ Source code for the opencode-worktree-enhanced plugin. All modules live flat in 
 4. **Config auto-creates defaults** — if `.opencode/worktree.jsonc` doesn't exist, it's created with helpful comments.
 5. **Branch name validation** is defense-in-depth — the `validateBranchName()` check in `src/validate.ts` runs before any git command.
 6. **Path traversal** is prevented at every file/symlink operation in `src/sync.ts`.
+7. **`worktreeDelete` requires `branch` — always.** There is no path-based fallback or "current session" detection. Session lookup is always via `getSessionByBranch()`. This eliminates the ambiguity that occurs when calling from a parent session. Use `worktreeList` to discover active branches first.
 
 ## Input/Output Expectations
 

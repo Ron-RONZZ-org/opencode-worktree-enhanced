@@ -43,14 +43,14 @@ You have dedicated Git worktree tools. Prefer them over raw \`git worktree\` bas
 | Tool | Use when |
 |------|----------|
 | \`worktreeCreate\` | Create an isolated worktree + spawn OpenCode in a new terminal |
-| \`worktreeDelete\` | Mark a worktree for deferred cleanup. Validates clean state + merged branch, then defers actual deletion (directory + branches) to the next \`worktreeCreate\` call. Use with a \`branch\` to delete from any session (not just the current worktree). |
+| \`worktreeDelete\` | Mark a worktree for deferred cleanup. Validates clean state + merged branch, then defers actual deletion (directory + branches) to the next \`worktreeCreate\` call. **\`branch\` is REQUIRED.** |
 | \`worktreeList\` | List active plugin-managed worktree sessions and git worktrees |
 
 Workflow:
 1. \`worktreeCreate\` with a branch name (e.g. feature/dark-mode)
 2. Work in the spawned isolated terminal session
-3. \`worktreeDelete\` with a reason when done — validates clean state and merged branch, marks for deferred cleanup (directory stays until session ends, actual removal happens on next \`worktreeCreate\`)
-4. To delete from a different session, provide the branch name: \`worktreeDelete(branch: "feature/my-feature", reason: "done")\`
+3. \`worktreeDelete\` with \`branch\` and a reason when done — validates clean state and merged branch, marks for deferred cleanup (directory stays until session ends, actual removal happens on next \`worktreeCreate\`)
+4. The \`branch\` parameter is always required — use \`worktreeList\` first to discover active sessions if you don't know the branch name
 
 **IMPORTANT**: Never use \`rm -rf\` on a worktree directory — this orphans the active opencode session and can cause data loss. Always use \`worktreeDelete\`.
 
@@ -122,7 +122,9 @@ export const WorktreeEnhancedPlugin: Plugin = async ({ client, directory, $ }) =
 			)
 			if (!hasMarker) {
 				config.instructions.push(
-					`${PLUGIN_MARKER}: prefer worktreeCreate/worktreeDelete/worktreeList over raw git worktree bash. Never use \`rm -rf\` on worktree directories — always use worktreeDelete.`,
+					`${PLUGIN_MARKER}: prefer worktreeCreate/worktreeDelete/worktreeList over raw git worktree bash. ` +
+					`\`worktreeDelete\` requires \`branch\` — always specify which worktree. ` +
+					`Never use \`rm -rf\` on worktree directories — always use worktreeDelete.`,
 				)
 			}
 		},
@@ -141,6 +143,8 @@ export const WorktreeEnhancedPlugin: Plugin = async ({ client, directory, $ }) =
 			output.context.push(`
 ## Worktree Tools (${PLUGIN_MARKER})
 Prefer: worktreeCreate, worktreeDelete, worktreeList.
+**\`worktreeDelete\` requires \`branch\`** — always specify which worktree to delete.
+Use \`worktreeList\` to discover active sessions.
 Never use raw \`git worktree add/remove\` when plugin tools are available.
 **Never use \`rm -rf\` on a worktree directory** — always use worktreeDelete.
 Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, hooks)
@@ -261,7 +265,8 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 					"then marks the worktree for deletion. Actual cleanup (remove directory, delete branches) " +
 					"happens on the next worktreeCreate call. This keeps the session directory alive " +
 					"so all tools continue to work. " +
-					"Provide a `branch` to delete a worktree from ANY session (not just the current one). " +
+					"`branch` is REQUIRED — always specify which worktree to delete. " +
+					"Use `worktreeList` first to find active sessions if unsure. " +
 					"Never use `rm -rf` on a worktree directory.",
 				args: {
 					reason: tool.schema
@@ -269,10 +274,9 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 						.describe("Brief explanation of why you are calling this tool"),
 					branch: tool.schema
 						.string()
-						.optional()
 						.describe(
-							"Branch name to delete (omit to delete the current session's worktree). " +
-							"Use this from a parent/other session to clean up a worktree found via worktreeList.",
+							"Branch name to delete. Always required — there is no default. " +
+							"Use `worktreeList` to find active worktree sessions if you don't know the branch name.",
 						),
 					force: tool.schema
 						.boolean()
@@ -283,40 +287,18 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 								"confirmed the branch is safe to delete (e.g., squash-merged on GitHub).",
 						),
 				},
-				async execute(args, toolCtx) {
+				async execute(args) {
 					if (!db || !inRepo) return "Not in a git repository."
 
-					// Resolve session — by branch name if provided, otherwise by current directory
-					let session = args.branch
-						? getSessionByBranch(db, args.branch)
-						: null
+					// Session lookup is always by branch name — it is a required parameter.
+					const session = getSessionByBranch(db, args.branch)
 
 					if (!session) {
-						// Fall back to current-session detection
-						let worktreePath: string | null = null
-						try {
-							const sessionInfo = await client.session.get({ path: { id: toolCtx.sessionID } })
-							if (sessionInfo.data?.directory) {
-								worktreePath = sessionInfo.data.directory
-							}
-						} catch {
-							// fall through
-						}
-
-						if (worktreePath) {
-							session = getSessionByPath(db, worktreePath)
-						}
-					}
-
-					if (!session) {
-						const branchHint = args.branch
-							? ` Branch "${args.branch}" was not found in the session database.`
-							: ""
 						return (
-							"No worktree session found. Only worktrees created via worktreeCreate can be deleted." +
-							branchHint +
-							"\n\nUse `worktreeList` to see all plugin-managed worktree sessions. " +
-							"Never use `rm -rf` on a worktree directory."
+							`❌ Branch "${args.branch}" was not found in the session database.\n` +
+							`Only worktrees created via \`worktreeCreate\` are tracked. ` +
+							`If this worktree was created by \`worktreeCreate\`, its session may have expired.\n\n` +
+							`Call \`worktreeList\` to see all active worktree sessions, then retry with the correct branch name.`
 						)
 					}
 
