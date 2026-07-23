@@ -2,8 +2,8 @@
  * opencode-worktree-enhanced — standalone opencode worktree plugin.
  *
  * Tools:
- *   worktreeCreate — Create a git worktree + spawn a new OpenCode terminal (delegation)
- *   worktreeNew    — Create a git worktree without a terminal (current agent works directly)
+ *   worktreeCreate — Create a git worktree + spawn a new OpenCode terminal (delegate)
+ *   worktreeNew    — Create a git worktree without a terminal (work directly)
  *   worktreeDelete — Validate and mark a worktree for deferred cleanup
  *   worktreeList   — List all worktrees with auto-import of manual ones
  */
@@ -45,8 +45,8 @@ You have dedicated Git worktree tools. Prefer them over raw \`git worktree\` bas
 
 | Tool | Use when |
 |------|----------|
-| \`worktreeCreate\` | Create a worktree + spawn a new OpenCode terminal (for master agents delegating work). |
-| \`worktreeNew\` | Create a worktree without a new terminal (for the current agent to work directly). Returns path + branch. |
+| \`worktreeCreate\` | Create a worktree + spawn a new OpenCode terminal (when you intend to delegate to a child agent). |
+| \`worktreeNew\` | Create a worktree without a new terminal (when you intend to work directly yourself). Returns path + branch. |
 | \`worktreeDelete\` | Mark a worktree for deferred cleanup. Validates clean state + merged branch, then defers actual deletion to next \`worktreeCreate\` call. **\`branch\` is REQUIRED.** Works for plugin-managed and manually-created worktrees. |
 | \`worktreeList\` | List all worktrees (plugin-managed, manually-created, pending cleanup). Auto-imports manual worktrees. |
 
@@ -234,8 +234,8 @@ export const WorktreeEnhancedPlugin: Plugin = async ({ client, directory, $ }) =
 			if (!hasMarker) {
 				config.instructions.push(
 					`${PLUGIN_MARKER}: tools: worktreeCreate, worktreeNew, worktreeDelete, worktreeList. ` +
-					`\`worktreeNew\` = create w/out terminal (for current agent); ` +
-					`\`worktreeCreate\` = create + spawn terminal (for delegation). ` +
+`\`worktreeNew\` = create w/out terminal (work directly); ` +
+`\`worktreeCreate\` = create + spawn terminal (delegate). ` +
 					`\`worktreeDelete\` requires \`branch\` — handles both plugin and manual worktrees. ` +
 					`Never use \`rm -rf\` on worktree directories — always use worktreeDelete.`,
 				)
@@ -269,8 +269,7 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 			worktreeCreate: tool({
 				description:
 					"Create an isolated git worktree and spawn a new terminal with OpenCode " +
-					"(for master agents delegating work to a child agent). " +
-					"Prefer \`worktreeNew\` when the current agent intends to work directly.",
+					"(when you intend to delegate work to a child agent).",
 				args: {
 					branch: tool.schema.string().describe("Branch name, e.g. feature/dark-mode"),
 					baseBranch: tool.schema
@@ -309,9 +308,8 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 			worktreeNew: tool({
 				description:
 					"Create a new git worktree (no new terminal spawned). " +
-					"Returns the worktree path and branch for the calling agent to work with directly. " +
-					"Use when the current agent is asked to work directly on something. " +
-					"For delegating work to a child agent, use \`worktreeCreate\` which spawns a new terminal.",
+					"Returns the worktree path and branch. " +
+					"Use when you intend to work directly yourself.",
 				args: {
 					branch: tool.schema.string().describe("Branch name, e.g. feature/dark-mode"),
 					baseBranch: tool.schema
