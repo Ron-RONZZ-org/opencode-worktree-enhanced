@@ -220,10 +220,57 @@ export async function getMainRepoRoot(cwd: string): Promise<string | null> {
 	return topLevel.ok ? topLevel.value : null
 }
 
+/** A single worktree entry from --porcelain output. */
+export interface WorktreeEntry {
+	path: string
+	/** Branch name without refs/heads/ prefix, or null for detached HEAD */
+	branch: string | null
+}
+
 /** List all git worktrees. Returns a formatted string. */
 export async function listWorktrees(repoRoot: string): Promise<string> {
 	const result = await git(["worktree", "list"], repoRoot)
 	return result.ok ? result.value : `(failed to list: ${result.error})`
+}
+
+/**
+ * List all git worktrees using --porcelain for stable machine parsing.
+ *
+ * Output format:
+ *   worktree /path/to/worktree
+ *   HEAD abc1234...
+ *   branch refs/heads/feature/foo
+ *   <blank line>
+ *
+ * For detached HEAD or bare repos, the `branch` field is absent or `detached`/`(bare)`.
+ */
+export async function listWorktreesPorcelain(repoRoot: string): Promise<Result<WorktreeEntry[]>> {
+	const result = await git(["worktree", "list", "--porcelain"], repoRoot)
+	if (!result.ok) return result
+
+	const entries: WorktreeEntry[] = []
+	let current: Partial<WorktreeEntry> = {}
+
+	for (const line of result.value.split("\n")) {
+		if (line.startsWith("worktree ")) {
+			if (current.path) {
+				entries.push(current as WorktreeEntry)
+			}
+			current = { path: line.slice(9) }
+		} else if (line.startsWith("branch ")) {
+			current.branch = line.slice(7).replace(/^refs\/heads\//, "")
+		} else if (line === "") {
+			if (current.path) {
+				entries.push(current as WorktreeEntry)
+			}
+			current = {}
+		}
+	}
+	if (current.path) {
+		entries.push(current as WorktreeEntry)
+	}
+
+	return Result.ok(entries)
 }
 
 /** Delete a local branch (safe delete — git -d refuses if not merged). */

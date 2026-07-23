@@ -16,6 +16,7 @@ import {
 	deleteLocalBranch,
 	getMainRepoRoot,
 	git,
+	listWorktreesPorcelain,
 	removeWorktree,
 	validateBranchMerged,
 	validateWorktreeClean,
@@ -25,6 +26,7 @@ import {
 	getAllSessions,
 	getSessionByBranch,
 	getSessionByPath,
+	importManualWorktrees,
 	removeSession,
 } from "../src/state"
 
@@ -643,7 +645,8 @@ describe("getSessionByBranch", () => {
 			id TEXT PRIMARY KEY,
 			branch TEXT NOT NULL,
 			path TEXT NOT NULL,
-			created_at TEXT NOT NULL
+			created_at TEXT NOT NULL,
+			source TEXT NOT NULL DEFAULT 'plugin'
 		)`)
 		db.run(`CREATE TABLE IF NOT EXISTS pending_delete (
 			branch TEXT PRIMARY KEY,
@@ -663,11 +666,12 @@ describe("getSessionByBranch", () => {
 
 	test("finds a session by branch name", () => {
 		addSession(db, {
-			id: "test-session-1",
-			branch: "feature/my-feature",
-			path: "/tmp/worktrees/my-feature",
-			createdAt: "2025-01-01T00:00:00Z",
-		})
+				id: "test-session-1",
+				branch: "feature/my-feature",
+				path: "/tmp/worktrees/my-feature",
+				createdAt: "2025-01-01T00:00:00Z",
+				source: "plugin",
+			})
 		const result = getSessionByBranch(db, "feature/my-feature")
 		expect(result).not.toBeNull()
 		expect(result!.id).toBe("test-session-1")
@@ -692,17 +696,19 @@ describe("getSessionByBranch", () => {
 
 	test("returns first matching session when multiple sessions share a branch", () => {
 		addSession(db, {
-			id: "test-session-duplicate",
-			branch: "feature/duplicate",
-			path: "/tmp/worktrees/duplicate-1",
-			createdAt: "2025-01-01T00:00:00Z",
-		})
-		addSession(db, {
-			id: "test-session-duplicate-2",
-			branch: "feature/duplicate",
-			path: "/tmp/worktrees/duplicate-2",
-			createdAt: "2025-01-02T00:00:00Z",
-		})
+				id: "test-session-duplicate",
+				branch: "feature/duplicate",
+				path: "/tmp/worktrees/duplicate-1",
+				createdAt: "2025-01-01T00:00:00Z",
+				source: "plugin",
+			})
+			addSession(db, {
+				id: "test-session-duplicate-2",
+				branch: "feature/duplicate",
+				path: "/tmp/worktrees/duplicate-2",
+				createdAt: "2025-01-02T00:00:00Z",
+				source: "plugin",
+			})
 		const result = getSessionByBranch(db, "feature/duplicate")
 		expect(result).not.toBeNull()
 		// Should return the first inserted row
@@ -765,7 +771,8 @@ describe("cross-session worktreeDelete scenario", () => {
 			id TEXT PRIMARY KEY,
 			branch TEXT NOT NULL,
 			path TEXT NOT NULL,
-			created_at TEXT NOT NULL
+			created_at TEXT NOT NULL,
+			source TEXT NOT NULL DEFAULT 'plugin'
 		)`)
 		db.run(`CREATE TABLE IF NOT EXISTS pending_delete (
 			branch TEXT PRIMARY KEY,
@@ -778,6 +785,7 @@ describe("cross-session worktreeDelete scenario", () => {
 			branch,
 			path: wtPath,
 			createdAt: new Date().toISOString(),
+			source: "plugin",
 		})
 
 		// Verify we can find it by branch (simulating the parent session's worktreeDelete call)
@@ -807,5 +815,236 @@ describe("cross-session worktreeDelete scenario", () => {
 
 		db.close()
 		fs.rmSync(dbPath, { force: true })
+	})
+})
+
+// =============================================================================
+// TESTS: listWorktreesPorcelain
+// =============================================================================
+
+describe("listWorktreesPorcelain", () => {
+	const mainRepo = path.join(SANDBOX, "porcelain-main")
+	const worktreesDir = path.join(SANDBOX, "porcelain-wts")
+	const branch = "feature/porcelain-test"
+	const wtPath = path.join(worktreesDir, "porcelain-test")
+
+	beforeAll(() => {
+		fs.mkdirSync(mainRepo, { recursive: true })
+		createGitRepo(mainRepo, "main")
+		fs.mkdirSync(worktreesDir, { recursive: true })
+		execSync(`git checkout -b ${branch}`, { cwd: mainRepo })
+		fs.writeFileSync(path.join(mainRepo, "porcelain.txt"), "porcelain work")
+		execSync("git add -A", { cwd: mainRepo })
+		execSync(`git commit -m "feat: porcelain test"`, { cwd: mainRepo })
+		execSync("git checkout main", { cwd: mainRepo })
+		execSync(`git worktree add ${wtPath} ${branch}`, { cwd: mainRepo })
+	})
+
+	afterAll(() => {
+		try {
+			if (fs.existsSync(wtPath)) {
+				execSync(`git worktree remove --force "${wtPath}"`, { cwd: mainRepo })
+			}
+		} catch { /* best-effort */ }
+		fs.rmSync(worktreesDir, { recursive: true, force: true })
+		fs.rmSync(mainRepo, { recursive: true, force: true })
+	})
+
+	test("parses porcelain output and finds the worktree by branch", async () => {
+		const result = await listWorktreesPorcelain(mainRepo)
+		expect(result.ok).toBe(true)
+
+		const entries = result.value!
+		expect(entries.length).toBeGreaterThanOrEqual(2) // main repo + worktree
+
+		// Find the worktree entry
+		const wtEntry = entries.find((e) => e.path === wtPath)
+		expect(wtEntry).toBeDefined()
+		expect(wtEntry!.branch).toBe(branch)
+	})
+
+	test("main repo entry is included with its branch", async () => {
+		const result = await listWorktreesPorcelain(mainRepo)
+		expect(result.ok).toBe(true)
+
+		const mainEntry = result.value!.find((e) => e.path === mainRepo)
+		expect(mainEntry).toBeDefined()
+		expect(mainEntry!.branch).toBe("main")
+	})
+})
+
+// =============================================================================
+// TESTS: importManualWorktrees
+// =============================================================================
+
+describe("importManualWorktrees", () => {
+	const dbPath = path.join(SANDBOX, "import-test.sqlite")
+	let db: Database
+
+	beforeAll(() => {
+		fs.mkdirSync(path.dirname(dbPath), { recursive: true })
+		db = new Database(dbPath)
+		db.run("PRAGMA journal_mode=WAL")
+		db.run(`CREATE TABLE IF NOT EXISTS sessions (
+			id TEXT PRIMARY KEY,
+			branch TEXT NOT NULL,
+			path TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			source TEXT NOT NULL DEFAULT 'plugin'
+		)`)
+		db.run(`CREATE TABLE IF NOT EXISTS pending_delete (
+			branch TEXT PRIMARY KEY,
+			path TEXT NOT NULL
+		)`)
+	})
+
+	afterAll(() => {
+		db.close()
+		fs.rmSync(dbPath, { force: true })
+	})
+
+	test("imports worktrees not in the database", () => {
+		const entries = [
+			{ path: "/tmp/wt/feature-one", branch: "feature/one" },
+			{ path: "/tmp/wt/feature-two", branch: "feature/two" },
+		]
+
+		const count = importManualWorktrees(db, entries)
+		expect(count).toBe(2)
+
+		// Verify sessions were added with source='manual'
+		const s1 = getSessionByBranch(db, "feature/one")
+		expect(s1).not.toBeNull()
+		expect(s1!.source).toBe("manual")
+		expect(s1!.path).toBe("/tmp/wt/feature-one")
+
+		const s2 = getSessionByBranch(db, "feature/two")
+		expect(s2).not.toBeNull()
+		expect(s2!.source).toBe("manual")
+		expect(s2!.path).toBe("/tmp/wt/feature-two")
+	})
+
+	test("skips entries that already exist in the database", () => {
+		const entries = [
+			{ path: "/tmp/wt/feature-one", branch: "feature/one" }, // already exists
+			{ path: "/tmp/wt/feature-three", branch: "feature/three" }, // new
+		]
+
+		const count = importManualWorktrees(db, entries)
+		expect(count).toBe(1) // only feature/three was new
+
+		// The existing one should still have its original source
+		const s1 = getSessionByBranch(db, "feature/one")
+		expect(s1).not.toBeNull()
+		expect(s1!.source).toBe("manual")
+	})
+
+	test("skips detached HEAD entries (no branch)", () => {
+		const entries = [
+			{ path: "/tmp/wt/detached", branch: null },
+		]
+
+		const count = importManualWorktrees(db, entries)
+		expect(count).toBe(0)
+	})
+
+	test("has no effect when called with empty array", () => {
+		const beforeCount = getAllSessions(db).length
+		const count = importManualWorktrees(db, [])
+		expect(count).toBe(0)
+		expect(getAllSessions(db).length).toBe(beforeCount)
+	})
+})
+
+// =============================================================================
+// TESTS: manual worktree deletion flow (simulates worktreeDelete with import)
+// =============================================================================
+
+describe("manual worktree deletion flow", () => {
+	const mainRepo = path.join(SANDBOX, "manual-delete-main")
+	const worktreesDir = path.join(SANDBOX, "manual-delete-wts")
+	const branch = "feature/manual-delete"
+	const wtPath = path.join(worktreesDir, "manual-delete")
+
+	// Each test gets its own DB to avoid cross-test pollution
+	let db: Database
+	const dbPath = path.join(SANDBOX, `manual-delete-db-${Date.now()}.sqlite`)
+
+	beforeAll(() => {
+		fs.mkdirSync(mainRepo, { recursive: true })
+		createGitRepo(mainRepo, "main")
+		fs.mkdirSync(worktreesDir, { recursive: true })
+
+		// Create feature branch, commit, merge into main, create worktree manually
+		execSync(`git checkout -b ${branch}`, { cwd: mainRepo })
+		fs.writeFileSync(path.join(mainRepo, "manual-delete.txt"), "manual work")
+		execSync("git add -A", { cwd: mainRepo })
+		execSync(`git commit -m "feat: manual delete test"`, { cwd: mainRepo })
+		execSync("git checkout main", { cwd: mainRepo })
+		execSync(`git merge ${branch} --no-edit`, { cwd: mainRepo })
+		// Manual worktree creation (NOT via plugin)
+		execSync(`git worktree add ${wtPath} ${branch}`, { cwd: mainRepo })
+	})
+
+	afterAll(() => {
+		try {
+			if (fs.existsSync(wtPath)) {
+				execSync(`git worktree remove --force "${wtPath}"`, { cwd: mainRepo })
+			}
+		} catch { /* best-effort */ }
+		fs.rmSync(worktreesDir, { recursive: true, force: true })
+		fs.rmSync(mainRepo, { recursive: true, force: true })
+		if (db) db.close()
+		fs.rmSync(dbPath, { force: true })
+	})
+
+	test("branch not in DB, but exists as a git worktree — import + find it", async () => {
+		fs.mkdirSync(path.dirname(dbPath), { recursive: true })
+		db = new Database(dbPath)
+		db.run("PRAGMA journal_mode=WAL")
+		db.run(`CREATE TABLE IF NOT EXISTS sessions (
+			id TEXT PRIMARY KEY,
+			branch TEXT NOT NULL,
+			path TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			source TEXT NOT NULL DEFAULT 'plugin'
+		)`)
+		db.run(`CREATE TABLE IF NOT EXISTS pending_delete (
+			branch TEXT PRIMARY KEY,
+			path TEXT NOT NULL
+		)`)
+
+		// Simulate: branch not in DB initially
+		let session = getSessionByBranch(db, branch)
+		expect(session).toBeNull()
+
+		// Import from porcelain
+		const porcelainResult = await listWorktreesPorcelain(mainRepo)
+		expect(porcelainResult.ok).toBe(true)
+
+		const imported = importManualWorktrees(db, porcelainResult.value)
+		expect(imported).toBeGreaterThanOrEqual(1) // at least our worktree
+
+		// Retry lookup
+		session = getSessionByBranch(db, branch)
+		expect(session).not.toBeNull()
+		expect(session!.branch).toBe(branch)
+		expect(session!.path).toBe(wtPath)
+		expect(session!.source).toBe("manual")
+
+		// Validate clean state
+		const cleanResult = await validateWorktreeClean(wtPath)
+		expect(cleanResult.ok).toBe(true)
+
+		// Validate merged
+		const mergeResult = await validateBranchMerged(mainRepo, branch, "main")
+		expect(mergeResult.ok).toBe(true)
+
+		// Cleanup: remove worktree + delete branch
+		const cleanupResult = await cleanupPendingWorktree(mainRepo, branch, wtPath)
+		expect(cleanupResult.ok).toBe(true)
+		expect(cleanupResult.worktreeRemoved).toBe(true)
+		expect(cleanupResult.localBranchDeleted).toBe(true)
+		expect(fs.existsSync(wtPath)).toBe(false)
 	})
 })

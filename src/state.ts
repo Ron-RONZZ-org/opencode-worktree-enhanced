@@ -15,12 +15,16 @@ import * as path from "node:path"
 import { Database } from "bun:sqlite"
 import { getProjectId } from "./project-id"
 
+/** Origin of a worktree session. */
+export type SessionSource = "plugin" | "manual"
+
 /** A worktree session record. */
 export interface Session {
 	id: string
 	branch: string
 	path: string
 	createdAt: string
+	source: SessionSource
 }
 
 /** A pending-delete record (used when worktree is marked for cleanup). */
@@ -67,7 +71,30 @@ export async function initStateDb(projectRoot: string): Promise<Database> {
 		branch TEXT PRIMARY KEY,
 		path TEXT NOT NULL
 	)`)
+	runMigrations(db)
 	return db
+}
+
+// =============================================================================
+// SCHEMA MIGRATIONS
+// =============================================================================
+
+/**
+ * Run schema migrations for the sessions table.
+ * Uses a `schema_version` pragma to track which migrations have been applied.
+ */
+function runMigrations(db: Database): void {
+	const version = db.query<{ version: number }, []>("PRAGMA schema_version").get()?.version ?? 0
+
+	if (version < 1) {
+		// v1: Add source column (default 'plugin' for backward compat)
+		try {
+			db.run("ALTER TABLE sessions ADD COLUMN source TEXT NOT NULL DEFAULT 'plugin'")
+		} catch {
+			// Column may already exist — ignore
+		}
+		db.run("PRAGMA schema_version = 1")
+	}
 }
 
 // =============================================================================
@@ -80,8 +107,8 @@ export function addSession(
 	session: Session,
 ): void {
 	db.run(
-		"INSERT OR REPLACE INTO sessions (id, branch, path, created_at) VALUES (?, ?, ?, ?)",
-		[session.id, session.branch, session.path, session.createdAt],
+		"INSERT OR REPLACE INTO sessions (id, branch, path, created_at, source) VALUES (?, ?, ?, ?, ?)",
+		[session.id, session.branch, session.path, session.createdAt, session.source],
 	)
 }
 
@@ -93,19 +120,24 @@ export function removeSession(
 	db.run("DELETE FROM sessions WHERE branch = ?", [branch])
 }
 
-/** Get a session by its opencode session ID. */
-export function getSession(
-	db: Database,
-	sessionId: string,
-): Session | null {
-	const row = db.query("SELECT id, branch, path, created_at FROM sessions WHERE id = ?").get(sessionId) as Record<string, unknown> | null
-	if (!row) return null
+function rowToSession(row: Record<string, unknown>): Session {
 	return {
 		id: String(row.id),
 		branch: String(row.branch),
 		path: String(row.path),
 		createdAt: String(row.created_at),
+		source: (row.source as SessionSource) ?? "plugin",
 	}
+}
+
+/** Get a session by its opencode session ID. */
+export function getSession(
+	db: Database,
+	sessionId: string,
+): Session | null {
+	const row = db.query("SELECT id, branch, path, created_at, source FROM sessions WHERE id = ?").get(sessionId) as Record<string, unknown> | null
+	if (!row) return null
+	return rowToSession(row)
 }
 
 /** Get a session by worktree path. */
@@ -113,14 +145,9 @@ export function getSessionByPath(
 	db: Database,
 	worktreePath: string,
 ): Session | null {
-	const row = db.query("SELECT id, branch, path, created_at FROM sessions WHERE path = ?").get(worktreePath) as Record<string, unknown> | null
+	const row = db.query("SELECT id, branch, path, created_at, source FROM sessions WHERE path = ?").get(worktreePath) as Record<string, unknown> | null
 	if (!row) return null
-	return {
-		id: String(row.id),
-		branch: String(row.branch),
-		path: String(row.path),
-		createdAt: String(row.created_at),
-	}
+	return rowToSession(row)
 }
 
 /** Get a session by branch name. */
@@ -128,27 +155,17 @@ export function getSessionByBranch(
 	db: Database,
 	branch: string,
 ): Session | null {
-	const row = db.query("SELECT id, branch, path, created_at FROM sessions WHERE branch = ?").get(branch) as Record<string, unknown> | null
+	const row = db.query("SELECT id, branch, path, created_at, source FROM sessions WHERE branch = ?").get(branch) as Record<string, unknown> | null
 	if (!row) return null
-	return {
-		id: String(row.id),
-		branch: String(row.branch),
-		path: String(row.path),
-		createdAt: String(row.created_at),
-	}
+	return rowToSession(row)
 }
 
 /** Get all sessions. */
 export function getAllSessions(
 	db: Database,
 ): Session[] {
-	const rows = db.query("SELECT id, branch, path, created_at FROM sessions ORDER BY created_at DESC").all() as Record<string, unknown>[]
-	return rows.map((row) => ({
-		id: String(row.id),
-		branch: String(row.branch),
-		path: String(row.path),
-		createdAt: String(row.created_at),
-	}))
+	const rows = db.query("SELECT id, branch, path, created_at, source FROM sessions ORDER BY created_at DESC").all() as Record<string, unknown>[]
+	return rows.map(rowToSession)
 }
 
 // =============================================================================
@@ -181,4 +198,45 @@ export function getPendingDelete(
 /** Clear all pending delete records. */
 export function clearPendingDelete(db: Database): void {
 	db.run("DELETE FROM pending_delete")
+}
+
+// =============================================================================
+// MANUAL WORKTREE IMPORT
+// =============================================================================
+
+/**
+ * Import worktrees that exist in git but are not tracked in the session DB.
+ * These are worktrees created manually via `git worktree add`.
+ *
+ * For each worktree entry with a branch:
+ *   - Skip if a session with the same path already exists
+ *   - Otherwise, insert a new session with source='manual'
+ *
+ * Returns the number of newly imported sessions.
+ */
+export function importManualWorktrees(
+	db: Database,
+	entries: Array<{ path: string; branch: string | null }>,
+): number {
+	let count = 0
+	for (const entry of entries) {
+		if (!entry.branch) continue // skip detached HEAD entries
+
+		// Skip if already tracked
+		const existing = getSessionByPath(db, entry.path)
+		if (existing) continue
+
+		const now = new Date().toISOString()
+		const id = `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
+		addSession(db, {
+			id,
+			branch: entry.branch,
+			path: entry.path,
+			createdAt: now,
+			source: "manual",
+		})
+		count++
+	}
+	return count
 }

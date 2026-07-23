@@ -2,9 +2,10 @@
  * opencode-worktree-enhanced — standalone opencode worktree plugin.
  *
  * Tools:
- *   worktreeCreate — Create an isolated git worktree + open a new terminal
- *   worktreeDelete — Validate and delete the current worktree (clean + merged checks)
- *   worktreeList   — List plugin-managed sessions and git worktrees
+ *   worktreeCreate — Create a git worktree + spawn a new OpenCode terminal (delegation)
+ *   worktreeNew    — Create a git worktree without a terminal (current agent works directly)
+ *   worktreeDelete — Validate and mark a worktree for deferred cleanup
+ *   worktreeList   — List all worktrees with auto-import of manual ones
  */
 import { type Plugin, tool } from "@opencode-ai/plugin"
 
@@ -15,6 +16,7 @@ import {
 	getMainRepoRoot,
 	getWorktreePath,
 	listWorktrees,
+	listWorktreesPorcelain,
 	validateBranchMerged,
 	validateWorktreeClean,
 } from "./git"
@@ -26,6 +28,7 @@ import {
 	getSession,
 	getSessionByBranch,
 	getSessionByPath,
+	importManualWorktrees,
 	initStateDb,
 	removeSession,
 	setPendingDelete,
@@ -42,13 +45,14 @@ You have dedicated Git worktree tools. Prefer them over raw \`git worktree\` bas
 
 | Tool | Use when |
 |------|----------|
-| \`worktreeCreate\` | Create an isolated worktree + spawn OpenCode in a new terminal |
-| \`worktreeDelete\` | Mark a worktree for deferred cleanup. Validates clean state + merged branch, then defers actual deletion (directory + branches) to the next \`worktreeCreate\` call. **\`branch\` is REQUIRED.** |
-| \`worktreeList\` | List active plugin-managed worktree sessions and git worktrees |
+| \`worktreeCreate\` | Create a worktree + spawn a new OpenCode terminal (for master agents delegating work). |
+| \`worktreeNew\` | Create a worktree without a new terminal (for the current agent to work directly). Returns path + branch. |
+| \`worktreeDelete\` | Mark a worktree for deferred cleanup. Validates clean state + merged branch, then defers actual deletion to next \`worktreeCreate\` call. **\`branch\` is REQUIRED.** Works for plugin-managed and manually-created worktrees. |
+| \`worktreeList\` | List all worktrees (plugin-managed, manually-created, pending cleanup). Auto-imports manual worktrees. |
 
 Workflow:
-1. \`worktreeCreate\` with a branch name (e.g. feature/dark-mode)
-2. Work in the spawned isolated terminal session
+1. \`worktreeCreate\` (delegate) or \`worktreeNew\` (work directly) with a branch name
+2. Work in the worktree directory
 3. \`worktreeDelete\` with \`branch\` and a reason when done — validates clean state and merged branch, marks for deferred cleanup (directory stays until session ends, actual removal happens on next \`worktreeCreate\`)
 4. The \`branch\` parameter is always required — use \`worktreeList\` first to discover active sessions if you don't know the branch name
 
@@ -88,6 +92,113 @@ async function isGitRepo($: { text: (strings: TemplateStringsArray, ...values: u
 	}
 }
 
+/**
+ * Result of the shared worktree creation flow.
+ */
+interface CreateWorktreeResult {
+	ok: true
+	worktreePath: string
+	branch: string
+	config: import("./config").WorktreeConfig
+}
+type CreateWorktreeError = { ok: false; error: string }
+
+/**
+ * Shared worktree creation logic used by both worktreeCreate and worktreeNew.
+ *
+ * Handles: branch validation, config loading, pending cleanup, git worktree add,
+ * session registration, file sync, and post-create hooks.
+ *
+ * Does NOT handle terminal spawning — that's the caller's responsibility.
+ */
+async function createWorktreeCommon(
+	args: { branch: string; baseBranch?: string },
+	context: {
+		db: Database
+		directory: string
+		logger: import("./utils").Logger
+	},
+): Promise<CreateWorktreeResult | CreateWorktreeError> {
+	const { db, directory, logger: log } = context
+	const { branch, baseBranch } = args
+
+	const branchError = validateBranchName(branch)
+	if (branchError) return { ok: false, error: `❌ Invalid branch name: ${branchError}` }
+
+	if (baseBranch) {
+		const baseError = validateBranchName(baseBranch)
+		if (baseError) return { ok: false, error: `❌ Invalid base branch name: ${baseError}` }
+	}
+
+	const config = await loadWorktreeConfig(directory, log)
+
+	// Clean up any orphaned pending worktree deletions before creating a new one.
+	// Uses the global DB, so this works from any session (parent or worktree).
+	const mainRepoRoot = await getMainRepoRoot(directory)
+	if (mainRepoRoot) {
+		const pending = getPendingDelete(db)
+		if (pending) {
+			const existingSession = getSessionByPath(db, pending.path)
+			if (!existingSession) {
+				log.info(`Cleaning up pending worktree: ${pending.branch}`)
+				const cleanupResult = await cleanupPendingWorktree(
+					mainRepoRoot,
+					pending.branch,
+					pending.path,
+					(msg) => log.info(msg),
+				)
+				if (cleanupResult.worktreeRemoved) {
+					log.info(`  Removed worktree: ${pending.path}`)
+				}
+				if (cleanupResult.localBranchDeleted) {
+					log.info(`  Deleted local branch: ${pending.branch}`)
+				}
+				if (cleanupResult.remoteBranchDeleted) {
+					log.info(`  Deleted remote branch: ${pending.branch}`)
+				}
+				if (cleanupResult.errors.length) {
+					for (const err of cleanupResult.errors) {
+						log.warn(`  Cleanup warning: ${err}`)
+					}
+				}
+				clearPendingDelete(db)
+			} else {
+				log.debug("Pending worktree still has active session — skipping cleanup")
+			}
+		}
+	}
+
+	const result = await createWorktree(directory, branch, baseBranch, config.worktreePath)
+	if (!result.ok) return { ok: false, error: `❌ Failed to create worktree: ${result.error}` }
+
+	const worktreePath = result.value
+
+	// Register session IMMEDIATELY after worktree creation, before
+	// any subsequent operations (sync, hooks). This ensures the session
+	// is in the DB even if something fails later — preventing a worktree
+	// from existing without a DB record.
+	addSession(db, {
+		id: `wt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+		branch,
+		path: worktreePath,
+		createdAt: new Date().toISOString(),
+		source: "plugin",
+	})
+
+	// Sync files from main worktree
+	if (config.sync.copyFiles.length) {
+		await copyFiles(directory, worktreePath, config.sync.copyFiles, log)
+	}
+	if (config.sync.symlinkDirs.length) {
+		await symlinkDirs(directory, worktreePath, config.sync.symlinkDirs, log)
+	}
+	if (config.hooks.postCreate.length) {
+		await runHooks(worktreePath, config.hooks.postCreate, log)
+	}
+
+	return { ok: true, worktreePath, branch, config }
+}
+
 export const WorktreeEnhancedPlugin: Plugin = async ({ client, directory, $ }) => {
 	const inRepo = await isGitRepo($, directory)
 	const log = makeLogger(client, PLUGIN_MARKER)
@@ -122,8 +233,10 @@ export const WorktreeEnhancedPlugin: Plugin = async ({ client, directory, $ }) =
 			)
 			if (!hasMarker) {
 				config.instructions.push(
-					`${PLUGIN_MARKER}: prefer worktreeCreate/worktreeDelete/worktreeList over raw git worktree bash. ` +
-					`\`worktreeDelete\` requires \`branch\` — always specify which worktree. ` +
+					`${PLUGIN_MARKER}: tools: worktreeCreate, worktreeNew, worktreeDelete, worktreeList. ` +
+					`\`worktreeNew\` = create w/out terminal (for current agent); ` +
+					`\`worktreeCreate\` = create + spawn terminal (for delegation). ` +
+					`\`worktreeDelete\` requires \`branch\` — handles both plugin and manual worktrees. ` +
 					`Never use \`rm -rf\` on worktree directories — always use worktreeDelete.`,
 				)
 			}
@@ -142,7 +255,8 @@ export const WorktreeEnhancedPlugin: Plugin = async ({ client, directory, $ }) =
 			if (!inRepo) return
 			output.context.push(`
 ## Worktree Tools (${PLUGIN_MARKER})
-Prefer: worktreeCreate, worktreeDelete, worktreeList.
+Tools: worktreeCreate (delegate), worktreeNew (work directly), worktreeDelete, worktreeList.
+\`worktreeDelete\` works for both plugin-managed and manually-created worktrees.
 **\`worktreeDelete\` requires \`branch\`** — always specify which worktree to delete.
 Use \`worktreeList\` to discover active sessions.
 Never use raw \`git worktree add/remove\` when plugin tools are available.
@@ -154,7 +268,9 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 		tool: {
 			worktreeCreate: tool({
 				description:
-					"Create an isolated git worktree and spawn a new terminal with OpenCode (prefer over bash git worktree)",
+					"Create an isolated git worktree and spawn a new terminal with OpenCode " +
+					"(for master agents delegating work to a child agent). " +
+					"Prefer \`worktreeNew\` when the current agent intends to work directly.",
 				args: {
 					branch: tool.schema.string().describe("Branch name, e.g. feature/dark-mode"),
 					baseBranch: tool.schema
@@ -165,88 +281,14 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 				async execute(args) {
 					if (!db || !inRepo) return "Not in a git repository."
 
-					const branchError = validateBranchName(args.branch)
-					if (branchError) return `❌ Invalid branch name: ${branchError}`
+					const common = await createWorktreeCommon(args, { db, directory, logger: log })
+					if (!common.ok) return common.error
 
-					if (args.baseBranch) {
-						const baseError = validateBranchName(args.baseBranch)
-						if (baseError) return `❌ Invalid base branch name: ${baseError}`
-					}
-
-					const config = await loadWorktreeConfig(directory, log)
-
-					// Clean up any orphaned pending worktree deletions before creating a new one.
-					// Uses the global DB, so this works from any session (parent or worktree).
-					const mainRepoRoot = await getMainRepoRoot(directory)
-					if (mainRepoRoot) {
-						const pending = getPendingDelete(db)
-						if (pending) {
-							const existingSession = getSessionByPath(db, pending.path)
-							if (!existingSession) {
-								log.info(`Cleaning up pending worktree: ${pending.branch}`)
-								const cleanupResult = await cleanupPendingWorktree(
-									mainRepoRoot,
-									pending.branch,
-									pending.path,
-									(msg) => log.info(msg),
-								)
-								if (cleanupResult.worktreeRemoved) {
-									log.info(`  Removed worktree: ${pending.path}`)
-								}
-								if (cleanupResult.localBranchDeleted) {
-									log.info(`  Deleted local branch: ${pending.branch}`)
-								}
-								if (cleanupResult.remoteBranchDeleted) {
-									log.info(`  Deleted remote branch: ${pending.branch}`)
-								}
-								if (cleanupResult.errors.length) {
-									for (const err of cleanupResult.errors) {
-										log.warn(`  Cleanup warning: ${err}`)
-									}
-								}
-								clearPendingDelete(db)
-							} else {
-								log.debug("Pending worktree still has active session — skipping cleanup")
-							}
-						}
-					}
-
-					const result = await createWorktree(
-						directory,
-						args.branch,
-						args.baseBranch,
-						config.worktreePath,
-					)
-					if (!result.ok) return `❌ Failed to create worktree: ${result.error}`
-
-					const worktreePath = result.value
-
-					// Register session IMMEDIATELY after worktree creation, before
-					// any subsequent operations (sync, hooks, terminal spawn).
-					// This ensures the session is in the DB even if openTerminal
-					// fails or the tool call is interrupted — preventing a worktree
-					// from existing without a DB record.
-					addSession(db, {
-						id: `wt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-						branch: args.branch,
-						path: worktreePath,
-						createdAt: new Date().toISOString(),
-					})
-
-					// Sync files from main worktree
-					if (config.sync.copyFiles.length) {
-						await copyFiles(directory, worktreePath, config.sync.copyFiles, log)
-					}
-					if (config.sync.symlinkDirs.length) {
-						await symlinkDirs(directory, worktreePath, config.sync.symlinkDirs, log)
-					}
-					if (config.hooks.postCreate.length) {
-						await runHooks(worktreePath, config.hooks.postCreate, log)
-					}
+					const { worktreePath, branch } = common
 
 					// Launch opencode directly in the worktree directory (fresh session)
 					const launchArgv = buildOpenCodeLaunchArgv(worktreePath)
-					const terminalResult = await openTerminal(worktreePath, launchArgv, args.branch)
+					const terminalResult = await openTerminal(worktreePath, launchArgv, branch)
 
 					if (!terminalResult.success) {
 						return [
@@ -258,8 +300,35 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 
 					return [
 						`✅ Worktree created at ${worktreePath}`,
-						`Branch: ${args.branch}`,
+						`Branch: ${branch}`,
 						`Opened in ${terminalResult.method ?? "a new terminal"}.`,
+					].join("\n")
+				},
+			}),
+
+			worktreeNew: tool({
+				description:
+					"Create a new git worktree (no new terminal spawned). " +
+					"Returns the worktree path and branch for the calling agent to work with directly. " +
+					"Use when the current agent is asked to work directly on something. " +
+					"For delegating work to a child agent, use \`worktreeCreate\` which spawns a new terminal.",
+				args: {
+					branch: tool.schema.string().describe("Branch name, e.g. feature/dark-mode"),
+					baseBranch: tool.schema
+						.string()
+						.optional()
+						.describe("Base branch to create from (defaults to HEAD)"),
+				},
+				async execute(args) {
+					if (!db || !inRepo) return "Not in a git repository."
+
+					const common = await createWorktreeCommon(args, { db, directory, logger: log })
+					if (!common.ok) return common.error
+
+					return [
+						`✅ Worktree created at ${common.worktreePath}`,
+						`Branch: ${common.branch}`,
+						`To start working: cd ${common.worktreePath}`,
 					].join("\n")
 				},
 			}),
@@ -270,6 +339,7 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 					"then marks the worktree for deletion. Actual cleanup (remove directory, delete branches) " +
 					"happens on the next worktreeCreate call. This keeps the session directory alive " +
 					"so all tools continue to work. " +
+					"Works for both plugin-managed and manually-created worktrees. " +
 					"`branch` is REQUIRED — always specify which worktree to delete. " +
 					"Use `worktreeList` first to find active sessions if unsure. " +
 					"Never use `rm -rf` on a worktree directory.",
@@ -295,22 +365,34 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 				async execute(args) {
 					if (!db || !inRepo) return "Not in a git repository."
 
-					// Session lookup is always by branch name — it is a required parameter.
-					const session = getSessionByBranch(db, args.branch)
-
-					if (!session) {
-						return (
-							`❌ Branch "${args.branch}" was not found in the session database.\n` +
-							`Only worktrees created via \`worktreeCreate\` are tracked. ` +
-							`If this worktree was created by \`worktreeCreate\`, its session may have expired.\n\n` +
-							`Call \`worktreeList\` to see all active worktree sessions, then retry with the correct branch name.`
-						)
-					}
-
-					// Resolve the parent repo root — stable CWD for validation.
+					// Resolve the parent repo root — needed for porcelain lookup and validation.
 					const mainRepoRoot = await getMainRepoRoot(directory)
 					if (!mainRepoRoot) {
 						return "❌ Could not determine the main repository root. Aborting."
+					}
+
+					// Session lookup is always by branch name — it is a required parameter.
+					let session = getSessionByBranch(db, args.branch)
+
+					// Not found in DB? Try importing manually-created worktrees from git,
+					// then retry the lookup. This handles worktrees created via `git worktree add`.
+					if (!session) {
+						const porcelainResult = await listWorktreesPorcelain(mainRepoRoot)
+						if (porcelainResult.ok) {
+							const imported = importManualWorktrees(db, porcelainResult.value)
+							if (imported > 0) {
+								log.info(`Imported ${imported} manually-created worktree(s) — retrying lookup`)
+							}
+						}
+						session = getSessionByBranch(db, args.branch)
+					}
+
+					if (!session) {
+						return (
+							`❌ Branch "${args.branch}" was not found in any worktree.\n\n` +
+							`No worktree is currently checked out at this branch. ` +
+							`Use \`worktreeList\` to see all active worktrees, then retry with the correct branch name.`
+						)
 					}
 
 					// ----- Validation phase (no deletion) -----
@@ -348,25 +430,51 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 
 			worktreeList: tool({
 				description:
-					"List plugin-managed worktree sessions and git worktrees (prefer over bash git worktree list)",
+					"List all git worktrees (plugin-managed, manually-created, and pending cleanup). " +
+					"Auto-imports manually-created worktrees for tracking. " +
+					"Prefer over bash git worktree list",
 				args: {
 					includeGit: tool.schema
 						.boolean()
 						.optional()
 						.default(true)
-						.describe("Include output from git worktree list"),
+						.describe("Include raw output from git worktree list"),
 				},
 				async execute(args) {
 					if (!db || !inRepo) return "Not in a git repository."
 
+					// Auto-import manually-created worktrees from git
+					const mainRepoRoot = await getMainRepoRoot(directory)
+					if (mainRepoRoot) {
+						const porcelainResult = await listWorktreesPorcelain(mainRepoRoot)
+						if (porcelainResult.ok) {
+							const imported = importManualWorktrees(db, porcelainResult.value)
+							if (imported > 0) {
+								log.info(`Imported ${imported} manually-created worktree(s)`)
+							}
+						}
+					}
+
 					const sessions = getAllSessions(db)
-					const lines: string[] = ["## Plugin-managed sessions"]
+					const lines: string[] = ["## Worktree sessions"]
 
 					if (!sessions.length) {
 						lines.push("(none)")
 					} else {
-						for (const s of sessions) {
-							lines.push(`- ${s.branch} → ${s.path} (session ${s.id}, created ${s.createdAt})`)
+						// Separate by source
+						const pluginSessions = sessions.filter((s) => s.source === "plugin")
+						const manualSessions = sessions.filter((s) => s.source === "manual")
+
+						const formatSession = (s: { branch: string; path: string; createdAt: string; id: string }) =>
+							`- ${s.branch} → ${s.path} (created ${s.createdAt})`
+
+						if (pluginSessions.length) {
+							lines.push("", `### Plugin-managed (${pluginSessions.length})`)
+							for (const s of pluginSessions) lines.push(formatSession(s))
+						}
+						if (manualSessions.length) {
+							lines.push("", `### Manually-created (${manualSessions.length})`)
+							for (const s of manualSessions) lines.push(formatSession(s))
 						}
 					}
 
@@ -377,7 +485,7 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 					}
 
 					if (args.includeGit) {
-						lines.push("", "## Git worktrees")
+						lines.push("", "## Git worktrees (raw)")
 						lines.push(await listWorktrees(directory))
 					}
 
