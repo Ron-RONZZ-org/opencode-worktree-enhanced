@@ -9,6 +9,7 @@
  * Self-contained — no external dependencies beyond Node/Bun built-ins.
  */
 
+import { readlinkSync } from "node:fs"
 import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
@@ -701,15 +702,69 @@ export async function openTerminal(
 	}
 }
 
+// =============================================================================
+// OPENCODE BINARY RESOLUTION
+// =============================================================================
+
+/** Cached absolute path to the opencode binary (resolved once). */
+let opencodeBinaryPath: string | null = null
+
+/**
+ * Resolve the absolute path to the opencode binary.
+ *
+ * Strategy (in priority order):
+ *   1. Linux: `readlink("/proc/self/exe")` — the plugin runs INSIDE the
+ *      opencode process, so /proc/self/exe IS the opencode binary.
+ *   2. Cross-platform: `Bun.which("opencode")` — searches the current
+ *      process's PATH (which found opencode to start this session).
+ *   3. Fallback: bare `"opencode"` string — relies on PATH in the spawned
+ *      shell (same as the pre-fix behavior).
+ *
+ * The resolved path is cached after the first call.
+ */
+export function getOpenCodeBinaryPath(): string {
+	if (opencodeBinaryPath) return opencodeBinaryPath
+
+	// 1. Linux: /proc/self/exe points to the running binary (which IS opencode).
+	if (process.platform === "linux") {
+		try {
+			const exePath = readlinkSync("/proc/self/exe")
+			const binName = path.basename(exePath)
+			if (binName === "opencode" || binName === "opencode.exe") {
+				opencodeBinaryPath = exePath
+				return exePath
+			}
+		} catch {
+			/* /proc not available — fall through */
+		}
+	}
+
+	// 2. Cross-platform: search the current process's PATH.
+	const whichResult = Bun.which("opencode")
+	if (whichResult) {
+		opencodeBinaryPath = whichResult
+		return whichResult
+	}
+
+	// 3. Fallback: hope it's on the spawned shell's PATH.
+	opencodeBinaryPath = "opencode"
+	return "opencode"
+}
+
 /** Build the argv to opencode in a worktree directory.
  *
  * When `serverUrl` is provided, generates `opencode attach <url> --dir <path>`
  * to connect the spawned terminal to a running opencode server.
  * When `serverUrl` is absent, starts a standalone opencode session.
+ *
+ * Uses the resolved absolute path to the opencode binary (see
+ * `getOpenCodeBinaryPath()`) so the command works even when the spawned
+ * terminal's shell does not have opencode on its PATH.
  */
 export function buildOpenCodeLaunchArgv(worktreePath: string, serverUrl?: string): string[] {
+	const opencode = getOpenCodeBinaryPath()
 	if (serverUrl) {
-		return ["opencode", "attach", serverUrl, "--dir", worktreePath]
+		return [opencode, "attach", serverUrl, "--dir", worktreePath]
 	}
-	return ["opencode", worktreePath]
+	return [opencode, worktreePath]
 }
