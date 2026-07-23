@@ -199,7 +199,7 @@ async function createWorktreeCommon(
 	return { ok: true, worktreePath, branch, config }
 }
 
-export const WorktreeEnhancedPlugin: Plugin = async ({ client, directory, $ }) => {
+export const WorktreeEnhancedPlugin: Plugin = async ({ client, directory, serverUrl, $ }) => {
 	const inRepo = await isGitRepo($, directory)
 	const log = makeLogger(client, PLUGIN_MARKER)
 
@@ -283,17 +283,25 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 					const common = await createWorktreeCommon(args, { db, directory, logger: log })
 					if (!common.ok) return common.error
 
-					const { worktreePath, branch } = common
+					const { worktreePath, branch, config } = common
 
-					// Launch opencode directly in the worktree directory (fresh session)
-					const launchArgv = buildOpenCodeLaunchArgv(worktreePath)
+					// Launch opencode in the worktree directory.
+					// When autoAttach is enabled (default), attach to the current server
+					// via `opencode attach <url> --dir <path>` instead of starting a
+					// standalone session, sharing the Bun/Node.js runtime, LLM connections,
+					// and MCP infrastructure across all worktree terminals.
+					const attachUrl = config.autoAttach && serverUrl ? serverUrl.toString() : undefined
+					const launchArgv = buildOpenCodeLaunchArgv(worktreePath, attachUrl)
 					const terminalResult = await openTerminal(worktreePath, launchArgv, branch)
 
 					if (!terminalResult.success) {
+						const manualCmd = attachUrl
+							? `opencode attach ${attachUrl} --dir ${worktreePath}`
+							: `opencode ${worktreePath}`
 						return [
 							`⚠️  Worktree created at ${worktreePath} — session registered.`,
 							`Terminal spawn failed: ${terminalResult.error ?? "unknown error"}`,
-							"Run `opencode .` manually in the worktree directory.",
+							`Run \`${manualCmd}\` manually in the worktree directory.`,
 						].join("\n")
 					}
 

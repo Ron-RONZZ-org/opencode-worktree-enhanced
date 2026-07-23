@@ -28,12 +28,19 @@ export interface WorktreeConfig {
 	}
 	/** Spawn worktree in a new terminal window vs current tab */
 	newTerminal: boolean
+	/**
+	 * When true (default), `worktreeCreate` will auto-attach the spawned
+	 * terminal to the current opencode server via `opencode attach`.
+	 * When false, it starts a standalone opencode session (`opencode .`).
+	 */
+	autoAttach: boolean
 }
 
 const DEFAULT_CONFIG: WorktreeConfig = {
 	sync: { copyFiles: [], symlinkDirs: [], exclude: [] },
 	hooks: { postCreate: [], preDelete: [] },
 	newTerminal: true,
+	autoAttach: true,
 }
 
 /**
@@ -81,7 +88,11 @@ function defaultConfigFile(): string {
   },
 
   // Spawn worktree in a new terminal window (true) or current tab (false)
-  "newTerminal": true
+  "newTerminal": true,
+
+  // Auto-attach spawned terminal to the current opencode server (true)
+  // vs starting a standalone opencode session (false)
+  "autoAttach": true
 }
 `
 }
@@ -126,6 +137,7 @@ export async function loadWorktreeConfig(
 				preDelete: arrayOr(parsed?.hooks?.preDelete, []),
 			},
 			newTerminal: parsed?.newTerminal !== false,
+			autoAttach: parsed?.autoAttach !== false,
 		}
 		if (parsed?.worktreePath) {
 			config.worktreePath = resolveHomePath(String(parsed.worktreePath))

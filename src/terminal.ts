@@ -701,7 +701,15 @@ export async function openTerminal(
 	}
 }
 
-/** Build the argv to launch opencode in a worktree directory. */
-export function buildOpenCodeLaunchArgv(worktreePath: string): string[] {
+/** Build the argv to opencode in a worktree directory.
+ *
+ * When `serverUrl` is provided, generates `opencode attach <url> --dir <path>`
+ * to connect the spawned terminal to a running opencode server.
+ * When `serverUrl` is absent, starts a standalone opencode session.
+ */
+export function buildOpenCodeLaunchArgv(worktreePath: string, serverUrl?: string): string[] {
+	if (serverUrl) {
+		return ["opencode", "attach", serverUrl, "--dir", worktreePath]
+	}
 	return ["opencode", worktreePath]
 }
