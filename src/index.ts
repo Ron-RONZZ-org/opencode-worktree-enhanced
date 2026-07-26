@@ -364,8 +364,8 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 						.optional()
 						.default(false)
 						.describe(
-							"Skip the merge-into-main validation and force deletion. Only use if you have " +
-								"confirmed the branch is safe to delete (e.g., squash-merged on GitHub).",
+							"Skip validation checks (uncommitted changes, merge-into-main) and force deletion. " +
+								"Only use if you have confirmed the worktree can be safely removed.",
 						),
 				},
 				async execute(args) {
@@ -402,10 +402,12 @@ Config: .opencode/worktree.jsonc (\`newTerminal\`, \`preserveHistory\`, sync, ho
 					}
 
 					// ----- Validation phase (no deletion) -----
-					// 1. Worktree must have no uncommitted changes
-					const cleanResult = await validateWorktreeClean(session.path)
-					if (!cleanResult.ok) {
-						return `❌ ${cleanResult.error}`
+					// 1. Worktree must have no uncommitted changes (unless --force)
+					if (!args.force) {
+						const cleanResult = await validateWorktreeClean(session.path)
+						if (!cleanResult.ok) {
+							return `❌ ${cleanResult.error}`
+						}
 					}
 
 					// 2. Branch must be fully merged into main (unless --force)

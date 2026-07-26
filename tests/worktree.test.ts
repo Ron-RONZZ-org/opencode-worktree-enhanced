@@ -629,6 +629,64 @@ describe("end-to-end: clean + unmerged fails merge validation", () => {
 	})
 })
 
+describe("end-to-end: dirty + force skips clean validation", () => {
+	const mainRepo = path.join(SANDBOX, "e2e-dirty-force")
+	const wtDir = path.join(SANDBOX, "e2e-dirty-force-wt")
+	const branch = "feature/dirty-force"
+	const wtPath = path.join(wtDir, "dirty-force")
+
+	beforeAll(() => {
+		fs.mkdirSync(mainRepo, { recursive: true })
+		createGitRepo(mainRepo, "main")
+		fs.mkdirSync(wtDir, { recursive: true })
+
+		// Create branch, commit, merge into main, create worktree
+		execSync(`git checkout -b ${branch}`, { cwd: mainRepo })
+		fs.writeFileSync(path.join(mainRepo, "dirty-force.txt"), "work")
+		execSync("git add -A", { cwd: mainRepo })
+		execSync(`git commit -m "feat: dirty force test"`, { cwd: mainRepo })
+		execSync("git checkout main", { cwd: mainRepo })
+		execSync(`git merge ${branch} --no-edit`, { cwd: mainRepo })
+		execSync(`git worktree add ${wtPath} ${branch}`, { cwd: mainRepo })
+
+		// Introduce uncommitted changes (simulating .opencode/ being created by plugin)
+		fs.mkdirSync(path.join(wtPath, ".opencode"), { recursive: true })
+		fs.writeFileSync(path.join(wtPath, ".opencode", "worktree.jsonc"), '{"version":1}')
+		// Also add an untracked file at root for good measure
+		fs.writeFileSync(path.join(wtPath, ".gitignore"), "# ephemeral")
+	})
+
+	afterAll(() => {
+		try {
+			if (fs.existsSync(wtPath)) {
+				execSync(`git worktree remove --force "${wtPath}"`, { cwd: mainRepo })
+			}
+		} catch { /* best-effort */ }
+		fs.rmSync(wtDir, { recursive: true, force: true })
+		fs.rmSync(mainRepo, { recursive: true, force: true })
+	})
+
+	test("clean check fails when worktree has uncommitted changes", async () => {
+		const clean = await validateWorktreeClean(wtPath)
+		expect(clean.ok).toBe(false)
+		expect(clean.error).toContain("uncommitted changes")
+	})
+
+	test("cleanup succeeds without clean check (simulating --force)", async () => {
+		// Skip validateWorktreeClean (as --force does), proceed directly to cleanup.
+		// The merge check would pass since branch is merged into main.
+		const mergeResult = await validateBranchMerged(mainRepo, branch, "main")
+		expect(mergeResult.ok).toBe(true)
+
+		// Simulate cleanupPendingWorktree (what worktreeCreate calls for deferred cleanup)
+		const cleanup = await cleanupPendingWorktree(mainRepo, branch, wtPath)
+		expect(cleanup.ok).toBe(true)
+		expect(cleanup.worktreeRemoved).toBe(true)
+		expect(cleanup.localBranchDeleted).toBe(true)
+		expect(fs.existsSync(wtPath)).toBe(false)
+	})
+})
+
 // =============================================================================
 // TESTS: state.ts — getSessionByBranch
 // =============================================================================
